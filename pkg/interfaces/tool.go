@@ -35,6 +35,16 @@ type InternalTool interface {
 	Internal() bool
 }
 
+// StreamingTool is an optional interface that tools can implement
+// to support streaming execution (e.g., subagents)
+type StreamingTool interface {
+	// SupportsStreaming returns true if the tool supports streaming
+	SupportsStreaming() bool
+	
+	// RunStream executes the tool with streaming response
+	RunStream(ctx context.Context, input string) (<-chan AgentStreamEvent, error)
+}
+
 // ParameterSpec defines the specification for a tool parameter
 type ParameterSpec struct {
 	// Type is the data type of the parameter (string, number, boolean, etc.)

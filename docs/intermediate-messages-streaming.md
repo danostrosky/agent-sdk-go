@@ -310,12 +310,69 @@ If intermediate messages create too much output, consider:
 - Implementing client-side filtering
 - Using the feature only during development/debugging
 
+## Subagent Streaming Support
+
+**New in this release:** When `IncludeIntermediateMessages` is enabled, you now also get real-time streaming from subagent executions!
+
+### How It Works
+
+When the parent agent delegates work to a subagent (via `WithAgents`), the subagent's streaming output is automatically forwarded to the parent's event stream. This provides complete visibility into the entire execution hierarchy.
+
+### Example with Subagents
+
+```go
+// Create specialized subagent
+mathAgent, _ := agent.NewAgent(
+    agent.WithName("MathAgent"),
+    agent.WithDescription("Handles mathematical calculations"),
+    agent.WithLLM(llm),
+    agent.WithTools(calculator),
+)
+
+// Create main agent with subagent and streaming enabled
+streamConfig := &interfaces.StreamConfig{
+    IncludeIntermediateMessages: true,  // Enables BOTH LLM and subagent streaming
+}
+
+mainAgent, _ := agent.NewAgent(
+    agent.WithLLM(llm),
+    agent.WithAgents(mathAgent),  // Add subagent
+    agent.WithStreamConfig(streamConfig),
+)
+
+// Stream with subagent visibility
+eventChan, _ := mainAgent.RunStream(ctx, "Calculate 15 + 27, then multiply by 3")
+
+for event := range eventChan {
+    // Subagent events include metadata
+    if subagentName, ok := event.Metadata["subagent_name"]; ok {
+        fmt.Printf("[SubAgent: %s] %s", subagentName, event.Content)
+    } else {
+        fmt.Print(event.Content)
+    }
+}
+```
+
+### Identifying Subagent Events
+
+Subagent events include special metadata fields:
+
+- `subagent_name`: Name of the subagent (e.g., "MathAgent")
+- `subagent_depth`: Recursion depth level (1 for direct subagent, 2 for nested, etc.)
+
+### Nested Subagents
+
+The feature supports nested subagent hierarchies. If a subagent calls another subagent, all intermediate messages are properly tagged with depth information.
+
+### Performance Note
+
+Subagent streaming adds minimal overhead since events are forwarded through existing channels without additional buffering.
+
 ## Future Enhancements
 
 Planned improvements include:
 - Granular control over which types of intermediate content to include
 - Ability to format intermediate messages differently from final output
-- Metadata tags to distinguish intermediate from final content
 - Performance optimizations for high-throughput scenarios
 
 ## Contributing

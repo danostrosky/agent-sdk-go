@@ -250,6 +250,136 @@ func (at *AgentTool) Run(ctx context.Context, input string) (string, error) {
 	return response.Content, nil
 }
 
+// SupportsStreaming returns true if the wrapped agent supports streaming
+func (at *AgentTool) SupportsStreaming() bool {
+	_, ok := at.agent.(interface {
+		RunStream(context.Context, string) (<-chan interfaces.AgentStreamEvent, error)
+	})
+	return ok
+}
+
+// RunStream executes the subagent with streaming if supported
+func (at *AgentTool) RunStream(ctx context.Context, input string) (<-chan interfaces.AgentStreamEvent, error) {
+	agentName := at.agent.GetName()
+
+	// Check if agent supports streaming
+	streamingAgent, ok := at.agent.(interface {
+		RunStream(context.Context, string) (<-chan interfaces.AgentStreamEvent, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("agent %s does not support streaming", agentName)
+	}
+
+	// Add agent name to context for tracing
+	ctx = tracing.WithAgentName(ctx, agentName)
+
+	// Check recursion depth
+	depth := getRecursionDepth(ctx)
+	if depth > MaxRecursionDepth {
+		err := fmt.Errorf("maximum recursion depth %d exceeded (current: %d)", MaxRecursionDepth, depth)
+		at.logger.Error(ctx, "Sub-agent recursion depth exceeded", map[string]interface{}{
+			"sub_agent":       agentName,
+			"recursion_depth": depth,
+			"max_depth":       MaxRecursionDepth,
+		})
+		
+		// Return channel with error event
+		eventChan := make(chan interfaces.AgentStreamEvent, 1)
+		go func() {
+			defer close(eventChan)
+			eventChan <- interfaces.AgentStreamEvent{
+				Type:      interfaces.AgentEventError,
+				Error:     err,
+				Timestamp: time.Now(),
+			}
+		}()
+		return eventChan, nil
+	}
+
+	// Update context with sub-agent metadata
+	ctx = context.WithValue(ctx, subAgentNameKey, agentName)
+	ctx = context.WithValue(ctx, parentAgentKey, "main")
+	ctx = context.WithValue(ctx, recursionDepthKey, depth+1)
+
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(ctx, at.timeout)
+
+	// Log sub-agent invocation
+	at.logger.Debug(ctx, "Invoking sub-agent with streaming", map[string]interface{}{
+		"sub_agent":       agentName,
+		"tool_name":       at.name,
+		"input_prompt":    input,
+		"recursion_depth": depth + 1,
+		"timeout":         at.timeout.String(),
+	})
+
+	// Create output event channel
+	eventChan := make(chan interfaces.AgentStreamEvent, 100)
+
+	// Start streaming in goroutine
+	go func() {
+		defer cancel()
+		defer close(eventChan)
+
+		// Start tracing span if tracer is available
+		var span interfaces.Span
+		if at.tracer != nil {
+			ctx, span = at.tracer.StartSpan(ctx, fmt.Sprintf("sub_agent.%s.stream", agentName))
+			defer span.End()
+
+			// Add span attributes
+			span.SetAttribute("sub_agent.name", agentName)
+			span.SetAttribute("sub_agent.input", input)
+			span.SetAttribute("sub_agent.tool_name", at.name)
+			span.SetAttribute("sub_agent.streaming", true)
+		}
+
+		// Start sub-agent streaming
+		subEventChan, err := streamingAgent.RunStream(ctx, input)
+		if err != nil {
+			at.logger.Error(ctx, "Sub-agent streaming failed to start", map[string]interface{}{
+				"sub_agent": agentName,
+				"tool_name": at.name,
+				"error":     err.Error(),
+			})
+
+			if span != nil {
+				span.SetAttribute("sub_agent.error", err.Error())
+			}
+
+			eventChan <- interfaces.AgentStreamEvent{
+				Type:      interfaces.AgentEventError,
+				Error:     fmt.Errorf("sub-agent %s failed to start streaming: %w", agentName, err),
+				Timestamp: time.Now(),
+			}
+			return
+		}
+
+		// Forward events with metadata tagging
+		for event := range subEventChan {
+			// Add metadata to identify subagent source
+			if event.Metadata == nil {
+				event.Metadata = make(map[string]interface{})
+			}
+			event.Metadata["subagent_name"] = agentName
+			event.Metadata["subagent_depth"] = depth + 1
+
+			eventChan <- event
+		}
+
+		at.logger.Debug(ctx, "Sub-agent streaming completed", map[string]interface{}{
+			"sub_agent": agentName,
+			"tool_name": at.name,
+		})
+
+		if span != nil {
+			span.SetAttribute("sub_agent.success", true)
+		}
+	}()
+
+	return eventChan, nil
+}
+
 // Execute implements interfaces.Tool.Execute
 func (at *AgentTool) Execute(ctx context.Context, args string) (string, error) {
 	agentName := at.agent.GetName()

@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -595,7 +596,58 @@ func (c *OpenAIClient) GenerateWithToolsStream(
 				}
 
 				// Execute the tool
-				result, err := foundTool.Execute(ctx, toolCall.Function.Arguments)
+				var result string
+				var err error
+
+				// Check if IncludeIntermediateMessages is enabled and tool is a streaming subagent
+				if params.StreamConfig != nil && params.StreamConfig.IncludeIntermediateMessages {
+					if streamingTool, ok := foundTool.(interfaces.StreamingTool); ok && streamingTool.SupportsStreaming() {
+						// Parse arguments to extract query
+						var args struct {
+							Query string `json:"query"`
+						}
+						if parseErr := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); parseErr == nil && args.Query != "" {
+							// Stream subagent execution
+							c.logger.Debug(ctx, "Streaming subagent execution", map[string]interface{}{
+								"subagent": toolCall.Function.Name,
+								"query":    args.Query,
+							})
+
+							subEventChan, streamErr := streamingTool.RunStream(ctx, args.Query)
+							if streamErr != nil {
+								result = fmt.Sprintf("Error: %v", streamErr)
+							} else {
+								var resultBuilder strings.Builder
+								for subEvent := range subEventChan {
+									// Forward all non-complete events to main stream
+									if subEvent.Type != interfaces.AgentEventComplete {
+										eventChan <- interfaces.StreamEvent{
+											Type:      convertAgentEventToStreamEvent(subEvent.Type),
+											Content:   subEvent.Content,
+											Metadata:  subEvent.Metadata,
+											Timestamp: subEvent.Timestamp,
+										}
+									}
+									// Accumulate content for final tool result
+									if subEvent.Type == interfaces.AgentEventContent {
+										resultBuilder.WriteString(subEvent.Content)
+									}
+								}
+								result = resultBuilder.String()
+							}
+						} else {
+							// Fall back to regular execution if parsing fails
+							result, err = foundTool.Execute(ctx, toolCall.Function.Arguments)
+						}
+					} else {
+						// Regular tool execution
+						result, err = foundTool.Execute(ctx, toolCall.Function.Arguments)
+					}
+				} else {
+					// Regular tool execution (IncludeIntermediateMessages is false)
+					result, err = foundTool.Execute(ctx, toolCall.Function.Arguments)
+				}
+
 				if err != nil {
 					c.logger.Error(ctx, "Tool execution error", map[string]interface{}{
 						"tool_name": toolCall.Function.Name,
@@ -835,5 +887,23 @@ func (c *OpenAIClient) convertToOpenAISchema(params map[string]interfaces.Parame
 		"type":       "object",
 		"properties": properties,
 		"required":   required,
+	}
+}
+
+// convertAgentEventToStreamEvent converts AgentEventType to StreamEventType
+func convertAgentEventToStreamEvent(agentType interfaces.AgentEventType) interfaces.StreamEventType {
+	switch agentType {
+	case interfaces.AgentEventContent:
+		return interfaces.StreamEventContentDelta
+	case interfaces.AgentEventThinking:
+		return interfaces.StreamEventThinking
+	case interfaces.AgentEventToolCall:
+		return interfaces.StreamEventToolUse
+	case interfaces.AgentEventToolResult:
+		return interfaces.StreamEventToolResult
+	case interfaces.AgentEventError:
+		return interfaces.StreamEventError
+	default:
+		return interfaces.StreamEventContentDelta
 	}
 }

@@ -309,6 +309,43 @@ result = mainAgent.Run(ctx, query)
 3. **Timeout**: 30-second default timeout per sub-agent call
 4. **Memory Isolation**: Each agent has separate memory by default
 
+## Streaming Support
+
+**New:** Subagents now support real-time streaming! When you enable `IncludeIntermediateMessages` in your stream config, you'll see intermediate messages from subagent executions.
+
+```go
+streamConfig := &interfaces.StreamConfig{
+    IncludeIntermediateMessages: true,  // Enables subagent streaming
+}
+
+mainAgent, _ := agent.NewAgent(
+    agent.WithLLM(llm),
+    agent.WithAgents(mathAgent, researchAgent),
+    agent.WithStreamConfig(streamConfig),
+)
+
+// Use RunStream to see subagent work in real-time
+eventChan, _ := mainAgent.RunStream(ctx, "Your query")
+
+for event := range eventChan {
+    // Subagent events include metadata
+    if subagentName, ok := event.Metadata["subagent_name"]; ok {
+        fmt.Printf("[%s]: %s", subagentName, event.Content)
+    } else {
+        fmt.Print(event.Content)
+    }
+}
+```
+
+### Benefits
+
+- **Complete Visibility**: See what each subagent is doing in real-time
+- **Better Debugging**: Understand the full execution flow
+- **User Transparency**: Show users the multi-agent collaboration process
+- **Zero Overhead**: Events are forwarded through existing channels
+
+For more details, see [Intermediate Messages Streaming Documentation](./intermediate-messages-streaming.md#subagent-streaming-support).
+
 ## Future Enhancements
 
 Potential improvements for the sub-agents feature:

@@ -603,7 +603,76 @@ func (c *GeminiClient) generateWithToolsAndStream(ctx context.Context, prompt st
 				"iteration": iteration + 1,
 			})
 
-			toolResult, err := selectedTool.Execute(ctx, toolCall.Arguments)
+			var toolResult string
+			var err error
+
+			// Check if IncludeIntermediateMessages is enabled and tool is a streaming subagent
+			if params.StreamConfig != nil && params.StreamConfig.IncludeIntermediateMessages {
+				if streamingTool, ok := selectedTool.(interfaces.StreamingTool); ok && streamingTool.SupportsStreaming() {
+					// Parse arguments to extract query
+					var args struct {
+						Query string `json:"query"`
+					}
+					if parseErr := json.Unmarshal([]byte(toolCall.Arguments), &args); parseErr == nil && args.Query != "" {
+						// Stream subagent execution
+						c.logger.Debug(ctx, "Streaming subagent execution", map[string]interface{}{
+							"subagent": toolCall.Name,
+							"query":    args.Query,
+						})
+
+						subEventChan, streamErr := streamingTool.RunStream(ctx, args.Query)
+						if streamErr != nil {
+							toolResult = fmt.Sprintf("Error: %v", streamErr)
+						} else {
+							var resultBuilder strings.Builder
+							for subEvent := range subEventChan {
+								// Check for context cancellation
+								select {
+								case <-ctx.Done():
+									toolResult = fmt.Sprintf("Error: context cancelled")
+									err = ctx.Err()
+									goto toolExecutionDone
+								default:
+								}
+
+								// Forward all non-complete events to main stream
+								if subEvent.Type != interfaces.AgentEventComplete {
+									select {
+									case eventCh <- interfaces.StreamEvent{
+										Type:      convertAgentEventToStreamEvent(subEvent.Type),
+										Content:   subEvent.Content,
+										Metadata:  subEvent.Metadata,
+										Timestamp: subEvent.Timestamp,
+									}:
+									case <-ctx.Done():
+										toolResult = fmt.Sprintf("Error: context cancelled")
+										err = ctx.Err()
+										goto toolExecutionDone
+									}
+								}
+								// Accumulate content for final tool result
+								if subEvent.Type == interfaces.AgentEventContent {
+									resultBuilder.WriteString(subEvent.Content)
+								}
+							}
+						toolExecutionDone:
+							if toolResult == "" {
+								toolResult = resultBuilder.String()
+							}
+						}
+					} else {
+						// Fall back to regular execution if parsing fails
+						toolResult, err = selectedTool.Execute(ctx, toolCall.Arguments)
+					}
+				} else {
+					// Regular tool execution
+					toolResult, err = selectedTool.Execute(ctx, toolCall.Arguments)
+				}
+			} else {
+				// Regular tool execution (IncludeIntermediateMessages is false)
+				toolResult, err = selectedTool.Execute(ctx, toolCall.Arguments)
+			}
+
 			if err != nil {
 				toolResult = fmt.Sprintf("Error: %v", err)
 			}
@@ -884,4 +953,22 @@ func (c *GeminiClient) executeStreamingRequestWithToolCapture(
 	}
 
 	return toolCalls, hasContent, nil
+}
+
+// convertAgentEventToStreamEvent converts AgentEventType to StreamEventType
+func convertAgentEventToStreamEvent(agentType interfaces.AgentEventType) interfaces.StreamEventType {
+	switch agentType {
+	case interfaces.AgentEventContent:
+		return interfaces.StreamEventContentDelta
+	case interfaces.AgentEventThinking:
+		return interfaces.StreamEventThinking
+	case interfaces.AgentEventToolCall:
+		return interfaces.StreamEventToolUse
+	case interfaces.AgentEventToolResult:
+		return interfaces.StreamEventToolResult
+	case interfaces.AgentEventError:
+		return interfaces.StreamEventError
+	default:
+		return interfaces.StreamEventContentDelta
+	}
 }
