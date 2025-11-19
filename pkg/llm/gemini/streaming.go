@@ -605,6 +605,10 @@ func (c *GeminiClient) generateWithToolsAndStream(ctx context.Context, prompt st
 
 			var toolResult string
 			var err error
+			
+			// Track if content was streamed (to avoid duplication)
+			var toolResultForLLM string
+			contentWasStreamed := false
 
 			// Check if IncludeIntermediateMessages is enabled and tool is a streaming subagent
 			if params.StreamConfig != nil && params.StreamConfig.IncludeIntermediateMessages {
@@ -623,6 +627,7 @@ func (c *GeminiClient) generateWithToolsAndStream(ctx context.Context, prompt st
 						subEventChan, streamErr := streamingTool.RunStream(ctx, args.Query)
 						if streamErr != nil {
 							toolResult = fmt.Sprintf("Error: %v", streamErr)
+							toolResultForLLM = toolResult
 						} else {
 							var resultBuilder strings.Builder
 							for subEvent := range subEventChan {
@@ -630,6 +635,7 @@ func (c *GeminiClient) generateWithToolsAndStream(ctx context.Context, prompt st
 								select {
 								case <-ctx.Done():
 									toolResult = fmt.Sprintf("Error: context cancelled")
+									toolResultForLLM = toolResult
 									err = ctx.Err()
 									goto toolExecutionDone
 								default:
@@ -646,48 +652,59 @@ func (c *GeminiClient) generateWithToolsAndStream(ctx context.Context, prompt st
 									}:
 									case <-ctx.Done():
 										toolResult = fmt.Sprintf("Error: context cancelled")
+										toolResultForLLM = toolResult
 										err = ctx.Err()
 										goto toolExecutionDone
 									}
 								}
-								// Accumulate content for final tool result
+								// Accumulate content for LLM context
 								if subEvent.Type == interfaces.AgentEventContent {
 									resultBuilder.WriteString(subEvent.Content)
 								}
 							}
 						toolExecutionDone:
 							if toolResult == "" {
-								toolResult = resultBuilder.String()
+								// Content was already streamed, so don't duplicate in ToolResult event
+								toolResultForLLM = resultBuilder.String()
+								toolResult = "" // Empty to avoid duplication
+								contentWasStreamed = true
+							} else {
+								// Error occurred, use the error message
+								toolResultForLLM = toolResult
 							}
 						}
 					} else {
 						// Fall back to regular execution if parsing fails
 						toolResult, err = selectedTool.Execute(ctx, toolCall.Arguments)
+						toolResultForLLM = toolResult
 					}
 				} else {
 					// Regular tool execution
 					toolResult, err = selectedTool.Execute(ctx, toolCall.Arguments)
+					toolResultForLLM = toolResult
 				}
 			} else {
 				// Regular tool execution (IncludeIntermediateMessages is false)
 				toolResult, err = selectedTool.Execute(ctx, toolCall.Arguments)
+				toolResultForLLM = toolResult
 			}
 
 			if err != nil {
 				toolResult = fmt.Sprintf("Error: %v", err)
+				toolResultForLLM = toolResult
 			}
 
-			// Add tool result as function response
+			// Add tool result as function response with full content for LLM context
 			functionResponses = append(functionResponses, &genai.Part{
 				FunctionResponse: &genai.FunctionResponse{
 					Name: toolCall.Name,
 					Response: map[string]any{
-						"result": toolResult,
+						"result": toolResultForLLM,
 					},
 				},
 			})
 
-			// Send tool result event
+			// Send tool result event (empty content if already streamed)
 			select {
 			case eventCh <- interfaces.StreamEvent{
 				Type: interfaces.StreamEventToolResult,
@@ -696,7 +713,10 @@ func (c *GeminiClient) generateWithToolsAndStream(ctx context.Context, prompt st
 					Name:      toolCall.Name,
 					Arguments: toolCall.Arguments,
 				},
-				Content:   toolResult, // Tool result goes in Content field
+				Content:   toolResult, // Empty if content was streamed, otherwise full result
+				Metadata: map[string]interface{}{
+					"content_streamed": contentWasStreamed,
+				},
 				Timestamp: time.Now(),
 			}:
 			case <-ctx.Done():

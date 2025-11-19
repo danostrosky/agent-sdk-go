@@ -666,6 +666,10 @@ func (c *AnthropicClient) executeStreamingWithTools(
 			var toolResult string
 			var err error
 
+			// Track if content was streamed (to avoid duplication)
+			var toolResultForLLM string
+			contentWasStreamed := false
+
 			// Check if IncludeIntermediateMessages is enabled and tool is a streaming subagent
 			if params.StreamConfig != nil && params.StreamConfig.IncludeIntermediateMessages {
 				if streamingTool, ok := selectedTool.(interfaces.StreamingTool); ok && streamingTool.SupportsStreaming() {
@@ -683,6 +687,7 @@ func (c *AnthropicClient) executeStreamingWithTools(
 						subEventChan, streamErr := streamingTool.RunStream(ctx, args.Query)
 						if streamErr != nil {
 							toolResult = fmt.Sprintf("Error: %v", streamErr)
+							toolResultForLLM = toolResult
 						} else {
 							var resultBuilder strings.Builder
 							for subEvent := range subEventChan {
@@ -699,36 +704,43 @@ func (c *AnthropicClient) executeStreamingWithTools(
 										return ctx.Err()
 									}
 								}
-								// Accumulate content for final tool result
+								// Accumulate content for LLM context
 								if subEvent.Type == interfaces.AgentEventContent {
 									resultBuilder.WriteString(subEvent.Content)
 								}
 							}
-							toolResult = resultBuilder.String()
+							// Content was already streamed, so don't duplicate in ToolResult event
+							toolResultForLLM = resultBuilder.String()
+							toolResult = "" // Empty to avoid duplication
+							contentWasStreamed = true
 						}
 					} else {
 						// Fall back to regular execution if parsing fails
 						toolResult, err = selectedTool.Execute(ctx, toolCall.Arguments)
+						toolResultForLLM = toolResult
 					}
 				} else {
 					// Regular tool execution
 					toolResult, err = selectedTool.Execute(ctx, toolCall.Arguments)
+					toolResultForLLM = toolResult
 				}
 			} else {
 				// Regular tool execution (IncludeIntermediateMessages is false)
 				toolResult, err = selectedTool.Execute(ctx, toolCall.Arguments)
+				toolResultForLLM = toolResult
 			}
 			if err != nil {
 				toolResult = fmt.Sprintf("Error: %v", err)
+				toolResultForLLM = toolResult
 			}
 
-			// Add tool result message
+			// Add tool result message with full content for LLM context
 			messages = append(messages, Message{
 				Role:    "user", // Tool results come as user messages to Anthropic
-				Content: fmt.Sprintf("Tool %s result: %s", toolCall.Name, toolResult),
+				Content: fmt.Sprintf("Tool %s result: %s", toolCall.Name, toolResultForLLM),
 			})
 
-			// Send tool result event
+			// Send tool result event (empty content if already streamed)
 			select {
 			case eventChan <- interfaces.StreamEvent{
 				Type: interfaces.StreamEventToolResult,
@@ -737,7 +749,10 @@ func (c *AnthropicClient) executeStreamingWithTools(
 					Name:      toolCall.Name,
 					Arguments: toolCall.Arguments,
 				},
-				Content:   toolResult, // Tool result goes in Content field
+				Content:   toolResult, // Empty if content was streamed, otherwise full result
+				Metadata: map[string]interface{}{
+					"content_streamed": contentWasStreamed,
+				},
 				Timestamp: time.Now(),
 			}:
 			case <-ctx.Done():

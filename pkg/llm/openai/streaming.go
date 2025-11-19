@@ -598,6 +598,10 @@ func (c *OpenAIClient) GenerateWithToolsStream(
 				// Execute the tool
 				var result string
 				var err error
+				
+				// Track if content was streamed (to avoid duplication)
+				var resultForLLM string
+				contentWasStreamed := false
 
 				// Check if IncludeIntermediateMessages is enabled and tool is a streaming subagent
 				if params.StreamConfig != nil && params.StreamConfig.IncludeIntermediateMessages {
@@ -616,6 +620,7 @@ func (c *OpenAIClient) GenerateWithToolsStream(
 							subEventChan, streamErr := streamingTool.RunStream(ctx, args.Query)
 							if streamErr != nil {
 								result = fmt.Sprintf("Error: %v", streamErr)
+								resultForLLM = result
 							} else {
 								var resultBuilder strings.Builder
 								for subEvent := range subEventChan {
@@ -628,24 +633,30 @@ func (c *OpenAIClient) GenerateWithToolsStream(
 											Timestamp: subEvent.Timestamp,
 										}
 									}
-									// Accumulate content for final tool result
+									// Accumulate content for LLM context
 									if subEvent.Type == interfaces.AgentEventContent {
 										resultBuilder.WriteString(subEvent.Content)
 									}
 								}
-								result = resultBuilder.String()
+								// Content was already streamed, so don't duplicate in ToolResult event
+								resultForLLM = resultBuilder.String()
+								result = "" // Empty to avoid duplication
+								contentWasStreamed = true
 							}
 						} else {
 							// Fall back to regular execution if parsing fails
 							result, err = foundTool.Execute(ctx, toolCall.Function.Arguments)
+							resultForLLM = result
 						}
 					} else {
 						// Regular tool execution
 						result, err = foundTool.Execute(ctx, toolCall.Function.Arguments)
+						resultForLLM = result
 					}
 				} else {
 					// Regular tool execution (IncludeIntermediateMessages is false)
 					result, err = foundTool.Execute(ctx, toolCall.Function.Arguments)
+					resultForLLM = result
 				}
 
 				if err != nil {
@@ -654,9 +665,10 @@ func (c *OpenAIClient) GenerateWithToolsStream(
 						"error":     err.Error(),
 					})
 					result = fmt.Sprintf("Error executing tool: %v", err)
+					resultForLLM = result
 				}
 
-				// Send tool result event
+				// Send tool result event (empty content if already streamed)
 				eventChan <- interfaces.StreamEvent{
 					Type:      interfaces.StreamEventToolResult,
 					Timestamp: time.Now(),
@@ -666,17 +678,18 @@ func (c *OpenAIClient) GenerateWithToolsStream(
 						Arguments: toolCall.Function.Arguments,
 					},
 					Metadata: map[string]interface{}{
-						"iteration": iteration + 1,
-						"result":    result,
+						"iteration":        iteration + 1,
+						"result":           result, // Empty if content was streamed
+						"content_streamed": contentWasStreamed,
 					},
 				}
 
-				// Add the tool result to the conversation
+				// Add the tool result to the conversation with full content for LLM context
 				c.logger.Debug(ctx, "Adding tool result to conversation", map[string]interface{}{
 					"tool_call_id":  toolCall.ID,
 					"id_length":     len(toolCall.ID),
 					"tool_name":     toolCall.Function.Name,
-					"result_length": len(result),
+					"result_length": len(resultForLLM),
 				})
 
 				// Ensure tool call ID is not swapped with result
@@ -688,8 +701,8 @@ func (c *OpenAIClient) GenerateWithToolsStream(
 					continue
 				}
 
-				// Create tool message - correct parameter order: content first, then tool_call_id
-				toolMessage := openai.ToolMessage(result, toolCall.ID)
+				// Create tool message with full content for LLM context - correct parameter order: content first, then tool_call_id
+				toolMessage := openai.ToolMessage(resultForLLM, toolCall.ID)
 				c.logger.Debug(ctx, "Created tool message", map[string]interface{}{
 					"message_type": "tool",
 				})
