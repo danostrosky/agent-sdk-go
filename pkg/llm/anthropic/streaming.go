@@ -969,8 +969,9 @@ func (c *AnthropicClient) executeBedrockStreaming(
 		}
 	}
 
-	// Check for stream errors
-	if err := stream.Err(); err != nil {
+	// Check for stream errors — io.EOF is expected after the stream completes
+	// (the Bedrock SSE connection closes normally after message_stop).
+	if err := stream.Err(); err != nil && err != io.EOF {
 		c.logger.Error(ctx, "Bedrock streaming error", map[string]interface{}{
 			"error": err.Error(),
 		})
