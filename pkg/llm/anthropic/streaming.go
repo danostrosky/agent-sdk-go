@@ -12,7 +12,6 @@ import (
 
 	"github.com/Ingenimax/agent-sdk-go/pkg/interfaces"
 	"github.com/Ingenimax/agent-sdk-go/pkg/multitenancy"
-	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 )
 
 // GenerateStream implements interfaces.StreamingLLM.GenerateStream
@@ -918,25 +917,25 @@ func (c *AnthropicClient) executeStreamingRequestWithToolCapture(
 	return c.createFilteredEventForwarder(ctx, tempEventChan, eventChan, filterContentDeltas)
 }
 
-// executeBedrockStreaming handles streaming for AWS Bedrock using the AWS SDK
+// executeBedrockStreaming handles streaming for AWS Bedrock using the official Anthropic SDK
 func (c *AnthropicClient) executeBedrockStreaming(
 	ctx context.Context,
 	req *CompletionRequest,
 	eventChan chan<- interfaces.StreamEvent,
 ) error {
-	c.logger.Debug(ctx, "Executing Bedrock streaming request", map[string]interface{}{
+	c.logger.Debug(ctx, "Executing Bedrock streaming request via SDK", map[string]interface{}{
 		"modelID": c.Model,
 		"region":  c.BedrockConfig.Region,
 	})
 
-	// Invoke Bedrock streaming
-	output, err := c.BedrockConfig.InvokeModelStream(ctx, c.Model, req)
+	// Convert request to SDK params
+	sdkParams := convertToSDKParams(req)
+
+	// Invoke Bedrock streaming via SDK
+	stream, err := c.BedrockConfig.InvokeModelStream(ctx, c.Model, sdkParams)
 	if err != nil {
 		return fmt.Errorf("failed to invoke Bedrock streaming: %w", err)
 	}
-
-	// Get the event stream
-	stream := output.GetStream()
 	defer func() {
 		if closeErr := stream.Close(); closeErr != nil {
 			c.logger.Warn(ctx, "Failed to close Bedrock stream", map[string]interface{}{
@@ -945,75 +944,28 @@ func (c *AnthropicClient) executeBedrockStreaming(
 		}
 	}()
 
-	// Track thinking blocks and tool blocks for proper event handling (reusing SSE logic)
-	thinkingBlocks := make(map[int]bool)
-	toolBlocks := make(map[int]struct {
-		ID        string
-		Name      string
-		InputJSON strings.Builder
-	})
+	// Track thinking blocks and tool blocks for proper event handling
+	thinkingBlocks := make(map[int64]bool)
+	toolBlocks := make(map[int64]*sdkToolBlockAccumulator)
 
-	// Process streaming events
-	for event := range stream.Events() {
-		// Check context cancellation early
+	// Process streaming events using SDK stream iterator
+	for stream.Next() {
+		// Check context cancellation
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		switch e := event.(type) {
-		case *types.ResponseStreamMemberChunk:
-			// Parse the chunk data - Bedrock returns flat JSON event structure
-			// Example: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello"}}
-			var rawEvent map[string]interface{}
-			if err := json.Unmarshal(e.Value.Bytes, &rawEvent); err != nil {
-				c.logger.Error(ctx, "Failed to parse Bedrock streaming chunk", map[string]interface{}{
-					"error": err.Error(),
-				})
-				continue
-			}
+		event := stream.Current()
 
-			// Extract event type
-			eventType, ok := rawEvent["type"].(string)
-			if !ok {
-				c.logger.Error(ctx, "Bedrock event missing type field", map[string]interface{}{
-					"raw_event": string(e.Value.Bytes),
-				})
-				continue
+		streamEvent := convertSDKStreamEvent(event, thinkingBlocks, toolBlocks)
+		if streamEvent != nil {
+			select {
+			case eventChan <- *streamEvent:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
-
-			// Convert flat Bedrock format to SSE format expected by convertAnthropicEventToStreamEvent
-			// SSE format wraps the event data in a "data" field
-			anthropicEvent := &AnthropicSSEEvent{
-				Type: eventType,
-				Data: e.Value.Bytes, // The raw event bytes contain all the data fields
-			}
-
-			// Reuse existing Anthropic event converter from sse.go
-			// This handles thinking blocks, tool use, and all event types properly
-			streamEvent, err := c.convertAnthropicEventToStreamEvent(anthropicEvent, thinkingBlocks, toolBlocks)
-			if err != nil {
-				c.logger.Error(ctx, "Failed to convert Bedrock event", map[string]interface{}{
-					"error":      err.Error(),
-					"event_type": eventType,
-				})
-				continue
-			}
-
-			if streamEvent != nil {
-				select {
-				case eventChan <- *streamEvent:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
-
-		default:
-			// Unknown event type
-			c.logger.Debug(ctx, "Unknown Bedrock streaming event type", map[string]interface{}{
-				"type": fmt.Sprintf("%T", e),
-			})
 		}
 	}
 

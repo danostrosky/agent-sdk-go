@@ -6,9 +6,9 @@ require (
 	cloud.google.com/go/auth v0.18.0
 	cloud.google.com/go/storage v1.59.0
 	github.com/alicebob/miniredis/v2 v2.35.0
+	github.com/anthropics/anthropic-sdk-go v1.4.0
 	github.com/aws/aws-sdk-go-v2 v1.41.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.6
-	github.com/aws/aws-sdk-go-v2/service/bedrockruntime v1.47.1
 	github.com/go-openapi/strfmt v0.23.0
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/google/go-github/v45 v45.2.0

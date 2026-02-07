@@ -2,12 +2,13 @@ package anthropic
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/Ingenimax/agent-sdk-go/pkg/logging"
+	sdkanthropic "github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/bedrock"
+	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 )
 
 // BedrockConfig contains configuration for AWS Bedrock
@@ -18,7 +19,7 @@ type BedrockConfig struct {
 
 	// Internal fields
 	awsConfig aws.Config
-	client    *bedrockruntime.Client
+	sdkClient *sdkanthropic.Client
 	logger    logging.Logger
 }
 
@@ -30,96 +31,41 @@ func NewBedrockConfigWithAWSConfig(ctx context.Context, awsConfig aws.Config) (*
 		return nil, fmt.Errorf("region is required in AWS config")
 	}
 
-	// Create Bedrock Runtime client from existing config
-	client := bedrockruntime.NewFromConfig(awsConfig)
+	// Create Anthropic SDK client with Bedrock middleware
+	sdkClient := sdkanthropic.NewClient(
+		bedrock.WithConfig(awsConfig),
+	)
 
 	bedrockConfig := &BedrockConfig{
 		Enabled:   true,
 		Region:    awsConfig.Region,
 		awsConfig: awsConfig,
-		client:    client,
+		sdkClient: &sdkClient,
 		logger:    logging.New(),
 	}
 
-	bedrockConfig.logger.Info(ctx, "Configured AWS Bedrock with existing AWS config", map[string]interface{}{
+	bedrockConfig.logger.Info(ctx, "Configured AWS Bedrock with official SDK", map[string]interface{}{
 		"region": awsConfig.Region,
 	})
 
 	return bedrockConfig, nil
 }
 
-// BedrockRequest represents the request format for AWS Bedrock (uses standard Anthropic format)
-type BedrockRequest struct {
-	MaxTokens        int            `json:"max_tokens"`
-	Messages         []Message      `json:"messages"`
-	System           string         `json:"system,omitempty"`
-	Tools            []Tool         `json:"tools,omitempty"`
-	ToolChoice       interface{}    `json:"tool_choice,omitempty"`
-	Temperature      float64        `json:"temperature,omitempty"`
-	TopP             float64        `json:"top_p,omitempty"`
-	TopK             int            `json:"top_k,omitempty"`
-	StopSequences    []string       `json:"stop_sequences,omitempty"`
-	AnthropicVersion string         `json:"anthropic_version"`
-	Thinking         *ReasoningSpec `json:"thinking,omitempty"` // Extended thinking support for Claude models
-}
-
-// TransformRequest converts an Anthropic CompletionRequest to Bedrock format
-func (bc *BedrockConfig) TransformRequest(req *CompletionRequest) (*BedrockRequest, error) {
+// InvokeModel invokes a Bedrock model using the official Anthropic SDK (non-streaming)
+func (bc *BedrockConfig) InvokeModel(ctx context.Context, modelID string, params sdkanthropic.MessageNewParams) (*sdkanthropic.Message, error) {
 	if !bc.Enabled {
 		return nil, fmt.Errorf("bedrock is not enabled")
 	}
 
-	bedrockReq := &BedrockRequest{
-		MaxTokens:        req.MaxTokens,
-		Messages:         req.Messages,
-		System:           req.System,
-		Tools:            req.Tools,
-		ToolChoice:       req.ToolChoice,
-		Temperature:      req.Temperature,
-		TopP:             req.TopP,
-		TopK:             req.TopK,
-		StopSequences:    req.StopSequences,
-		AnthropicVersion: "bedrock-2023-05-31", // Required for Bedrock
-		Thinking:         req.Thinking,         // Extended thinking support
-	}
+	// Set the model on the params
+	params.Model = sdkanthropic.Model(modelID)
 
-	return bedrockReq, nil
-}
-
-// InvokeModel invokes a Bedrock model using the AWS SDK (non-streaming)
-// TODO: Add prompt caching support for Bedrock. Currently, caching options are ignored
-// when using Bedrock. The cache_control blocks would need to be added to BedrockRequest
-// and the request format verified against AWS Bedrock's Anthropic integration.
-func (bc *BedrockConfig) InvokeModel(ctx context.Context, modelID string, req *CompletionRequest) (*CompletionResponse, error) {
-	if !bc.Enabled {
-		return nil, fmt.Errorf("bedrock is not enabled")
-	}
-
-	// Transform request to Bedrock format
-	bedrockReq, err := bc.TransformRequest(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to transform request: %w", err)
-	}
-
-	// Marshal request to JSON
-	requestBody, err := json.Marshal(bedrockReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	bc.logger.Debug(ctx, "Invoking Bedrock model", map[string]interface{}{
-		"modelID":     modelID,
-		"region":      bc.Region,
-		"requestSize": len(requestBody),
+	bc.logger.Debug(ctx, "Invoking Bedrock model via SDK", map[string]interface{}{
+		"modelID": modelID,
+		"region":  bc.Region,
 	})
 
-	// Invoke the model using AWS SDK
-	output, err := bc.client.InvokeModel(ctx, &bedrockruntime.InvokeModelInput{
-		ModelId:     aws.String(modelID),
-		Body:        requestBody,
-		ContentType: aws.String("application/json"),
-		Accept:      aws.String("application/json"),
-	})
+	msg, err := bc.sdkClient.Messages.New(ctx, params)
 	if err != nil {
 		bc.logger.Error(ctx, "Failed to invoke Bedrock model", map[string]interface{}{
 			"error":   err.Error(),
@@ -129,63 +75,41 @@ func (bc *BedrockConfig) InvokeModel(ctx context.Context, modelID string, req *C
 		return nil, fmt.Errorf("failed to invoke Bedrock model: %w", err)
 	}
 
-	// Parse response (Bedrock returns standard Anthropic response format)
-	var resp CompletionResponse
-	if err := json.Unmarshal(output.Body, &resp); err != nil {
-		bc.logger.Error(ctx, "Failed to parse Bedrock response", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return nil, fmt.Errorf("failed to parse Bedrock response: %w", err)
-	}
-
 	bc.logger.Debug(ctx, "Successfully received response from Bedrock", map[string]interface{}{
 		"modelID":      modelID,
-		"stopReason":   resp.StopReason,
-		"inputTokens":  resp.Usage.InputTokens,
-		"outputTokens": resp.Usage.OutputTokens,
+		"stopReason":   msg.StopReason,
+		"inputTokens":  msg.Usage.InputTokens,
+		"outputTokens": msg.Usage.OutputTokens,
 	})
 
-	return &resp, nil
+	return msg, nil
 }
 
-// InvokeModelStream invokes a Bedrock model with streaming using AWS SDK
-func (bc *BedrockConfig) InvokeModelStream(ctx context.Context, modelID string, req *CompletionRequest) (*bedrockruntime.InvokeModelWithResponseStreamOutput, error) {
+// InvokeModelStream invokes a Bedrock model with streaming using the official Anthropic SDK
+func (bc *BedrockConfig) InvokeModelStream(ctx context.Context, modelID string, params sdkanthropic.MessageNewParams) (*ssestream.Stream[sdkanthropic.MessageStreamEventUnion], error) {
 	if !bc.Enabled {
 		return nil, fmt.Errorf("bedrock is not enabled")
 	}
 
-	// Transform request to Bedrock format
-	bedrockReq, err := bc.TransformRequest(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to transform request: %w", err)
-	}
+	// Set the model on the params
+	params.Model = sdkanthropic.Model(modelID)
 
-	// Marshal request to JSON
-	requestBody, err := json.Marshal(bedrockReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	bc.logger.Debug(ctx, "Invoking Bedrock model with streaming", map[string]interface{}{
+	bc.logger.Debug(ctx, "Invoking Bedrock model with streaming via SDK", map[string]interface{}{
 		"modelID": modelID,
 		"region":  bc.Region,
 	})
 
-	// Invoke the model with streaming using AWS SDK
-	output, err := bc.client.InvokeModelWithResponseStream(ctx, &bedrockruntime.InvokeModelWithResponseStreamInput{
-		ModelId:     aws.String(modelID),
-		Body:        requestBody,
-		ContentType: aws.String("application/json"),
-		Accept:      aws.String("application/json"),
-	})
-	if err != nil {
+	stream := bc.sdkClient.Messages.NewStreaming(ctx, params)
+
+	// Check for immediate errors
+	if stream.Err() != nil {
 		bc.logger.Error(ctx, "Failed to invoke Bedrock model with streaming", map[string]interface{}{
-			"error":   err.Error(),
+			"error":   stream.Err().Error(),
 			"modelID": modelID,
 			"region":  bc.Region,
 		})
-		return nil, fmt.Errorf("failed to invoke Bedrock model with streaming: %w", err)
+		return nil, fmt.Errorf("failed to invoke Bedrock model with streaming: %w", stream.Err())
 	}
 
-	return output, nil
+	return stream, nil
 }

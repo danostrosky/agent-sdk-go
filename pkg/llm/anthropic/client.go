@@ -606,13 +606,14 @@ Return only the JSON object, with no additional text or markdown formatting.`, p
 			apiType = "anthropic"
 		}
 
-		// Bedrock uses AWS SDK, not HTTP requests
+		// Bedrock uses the official Anthropic SDK with Bedrock middleware
 		if c.BedrockConfig != nil && c.BedrockConfig.Enabled {
-			bedrockResp, err := c.BedrockConfig.InvokeModel(ctx, c.Model, &req)
+			sdkParams := convertToSDKParams(&req)
+			sdkResp, err := c.BedrockConfig.InvokeModel(ctx, c.Model, sdkParams)
 			if err != nil {
 				return fmt.Errorf("failed to invoke Bedrock model: %w", err)
 			}
-			resp = *bedrockResp
+			resp = *convertFromSDKMessage(sdkResp)
 			return nil
 		}
 
@@ -820,7 +821,9 @@ func (c *AnthropicClient) Chat(ctx context.Context, messages []llm.Message, para
 
 	operation := func() error {
 		var apiType string
-		if c.VertexConfig != nil && c.VertexConfig.Enabled {
+		if c.BedrockConfig != nil && c.BedrockConfig.Enabled {
+			apiType = "Bedrock"
+		} else if c.VertexConfig != nil && c.VertexConfig.Enabled {
 			apiType = "Vertex AI"
 		} else {
 			apiType = "Anthropic API"
@@ -833,6 +836,17 @@ func (c *AnthropicClient) Chat(ctx context.Context, messages []llm.Message, para
 			"stop_sequences": req.StopSequences,
 			"messages":       len(req.Messages),
 		})
+
+		// Bedrock uses the official Anthropic SDK with Bedrock middleware
+		if c.BedrockConfig != nil && c.BedrockConfig.Enabled {
+			sdkParams := convertToSDKParams(&req)
+			sdkResp, err := c.BedrockConfig.InvokeModel(ctx, c.Model, sdkParams)
+			if err != nil {
+				return fmt.Errorf("failed to invoke Bedrock model for chat: %w", err)
+			}
+			resp = *convertFromSDKMessage(sdkResp)
+			return nil
+		}
 
 		var httpReq *http.Request
 
@@ -1133,6 +1147,17 @@ func (c *AnthropicClient) GenerateWithTools(ctx context.Context, prompt string, 
 
 		// Define operation for retry mechanism
 		operation := func() error {
+			// Bedrock uses the official Anthropic SDK with Bedrock middleware
+			if c.BedrockConfig != nil && c.BedrockConfig.Enabled {
+				sdkParams := convertToSDKParams(&req)
+				sdkResp, err := c.BedrockConfig.InvokeModel(ctx, c.Model, sdkParams)
+				if err != nil {
+					return fmt.Errorf("failed to invoke Bedrock model with tools (iteration %d): %w", iteration+1, err)
+				}
+				resp = *convertFromSDKMessage(sdkResp)
+				return nil
+			}
+
 			// Create HTTP request (supports both Vertex AI and standard Anthropic API, with caching)
 			httpReq, err := c.createHTTPRequestWithCache(ctx, &req, "/v1/messages", params.CacheConfig)
 			if err != nil {
@@ -1438,73 +1463,84 @@ CRITICAL INSTRUCTIONS:
 		"messages": len(finalReq.Messages),
 	})
 
-	// Create final HTTP request (supports both Vertex AI and standard Anthropic API)
-	finalHTTPReq, err := c.createHTTPRequest(ctx, &finalReq, "/v1/messages")
-	if err != nil {
-		return "", fmt.Errorf("failed to create final request: %w", err)
-	}
-
-	// Send final request
-	finalHTTPResp, err := c.HTTPClient.Do(finalHTTPReq)
-	if err != nil {
-		c.logger.Error(ctx, "Error in final call without tools", map[string]interface{}{"error": err.Error()})
-		return "", fmt.Errorf("failed to send final request: %w", err)
-	}
-	defer func() {
-		if closeErr := finalHTTPResp.Body.Close(); closeErr != nil {
-			c.logger.Warn(ctx, "Failed to close final response body", map[string]interface{}{
-				"error": closeErr.Error(),
-			})
-		}
-	}()
-
-	// Read final response body
-	finalRespBody, err := io.ReadAll(finalHTTPResp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read final response body: %w", err)
-	}
-
-	// Check for error response
-	if finalHTTPResp.StatusCode != http.StatusOK {
-		c.logger.Error(ctx, "Error from Anthropic API in final call", map[string]interface{}{
-			"status_code": finalHTTPResp.StatusCode,
-			"response":    string(finalRespBody),
-		})
-		return "", fmt.Errorf("error from Anthropic API in final call: %s", string(finalRespBody))
-	}
-
-	// Log raw final response before unmarshaling for debugging
-	c.logger.Debug(ctx, "Raw final response before unmarshaling", map[string]interface{}{
-		"response_length": len(finalRespBody),
-		"response_prefix": func() string {
-			if len(finalRespBody) > 100 {
-				return string(finalRespBody[:100])
-			}
-			return string(finalRespBody)
-		}(),
-		"first_char": func() string {
-			if len(finalRespBody) > 0 {
-				return fmt.Sprintf("'%c' (0x%02x)", finalRespBody[0], finalRespBody[0])
-			}
-			return "empty"
-		}(),
-	})
-
-	// Unmarshal final response
 	var finalResp CompletionResponse
-	err = json.Unmarshal(finalRespBody, &finalResp)
-	if err != nil {
-		c.logger.Error(ctx, "Failed to unmarshal final response", map[string]interface{}{
-			"error":           err.Error(),
+
+	// Bedrock uses the official Anthropic SDK with Bedrock middleware
+	if c.BedrockConfig != nil && c.BedrockConfig.Enabled {
+		sdkParams := convertToSDKParams(&finalReq)
+		sdkResp, err := c.BedrockConfig.InvokeModel(ctx, c.Model, sdkParams)
+		if err != nil {
+			return "", fmt.Errorf("failed to invoke Bedrock model for final request: %w", err)
+		}
+		finalResp = *convertFromSDKMessage(sdkResp)
+	} else {
+		// Create final HTTP request (supports both Vertex AI and standard Anthropic API)
+		finalHTTPReq, err := c.createHTTPRequest(ctx, &finalReq, "/v1/messages")
+		if err != nil {
+			return "", fmt.Errorf("failed to create final request: %w", err)
+		}
+
+		// Send final request
+		finalHTTPResp, err := c.HTTPClient.Do(finalHTTPReq)
+		if err != nil {
+			c.logger.Error(ctx, "Error in final call without tools", map[string]interface{}{"error": err.Error()})
+			return "", fmt.Errorf("failed to send final request: %w", err)
+		}
+		defer func() {
+			if closeErr := finalHTTPResp.Body.Close(); closeErr != nil {
+				c.logger.Warn(ctx, "Failed to close final response body", map[string]interface{}{
+					"error": closeErr.Error(),
+				})
+			}
+		}()
+
+		// Read final response body
+		finalRespBody, err := io.ReadAll(finalHTTPResp.Body)
+		if err != nil {
+			return "", fmt.Errorf("failed to read final response body: %w", err)
+		}
+
+		// Check for error response
+		if finalHTTPResp.StatusCode != http.StatusOK {
+			c.logger.Error(ctx, "Error from Anthropic API in final call", map[string]interface{}{
+				"status_code": finalHTTPResp.StatusCode,
+				"response":    string(finalRespBody),
+			})
+			return "", fmt.Errorf("error from Anthropic API in final call: %s", string(finalRespBody))
+		}
+
+		// Log raw final response before unmarshaling for debugging
+		c.logger.Debug(ctx, "Raw final response before unmarshaling", map[string]interface{}{
 			"response_length": len(finalRespBody),
-			"response_sample": func() string {
-				if len(finalRespBody) > 200 {
-					return string(finalRespBody[:200])
+			"response_prefix": func() string {
+				if len(finalRespBody) > 100 {
+					return string(finalRespBody[:100])
 				}
 				return string(finalRespBody)
 			}(),
+			"first_char": func() string {
+				if len(finalRespBody) > 0 {
+					return fmt.Sprintf("'%c' (0x%02x)", finalRespBody[0], finalRespBody[0])
+				}
+				return "empty"
+			}(),
 		})
-		return "", fmt.Errorf("failed to unmarshal final response: %w", err)
+
+		// Unmarshal final response
+		err = json.Unmarshal(finalRespBody, &finalResp)
+		if err != nil {
+			c.logger.Error(ctx, "Failed to unmarshal final response", map[string]interface{}{
+				"error":           err.Error(),
+				"response_length": len(finalRespBody),
+				"response_sample": func() string {
+					if len(finalRespBody) > 200 {
+						return string(finalRespBody[:200])
+					}
+					return string(finalRespBody)
+				}(),
+			})
+			return "", fmt.Errorf("failed to unmarshal final response: %w", err)
+		}
 	}
 
 	// Extract text content from final response
