@@ -90,6 +90,8 @@ func (c *AnthropicClient) GenerateStream(
 			req.Thinking = &ReasoningSpec{
 				Type: "adaptive",
 			}
+			// Thinking is not compatible with temperature modifications; omit it
+			req.Temperature = 0
 			c.logger.Debug(ctx, "Enabled adaptive thinking for stream", map[string]interface{}{
 				"model":     c.Model,
 				"max_tokens": maxTokens,
@@ -101,8 +103,8 @@ func (c *AnthropicClient) GenerateStream(
 			if params.LLMConfig.ReasoningBudget > 0 {
 				req.Thinking.BudgetTokens = params.LLMConfig.ReasoningBudget
 			}
-			// Anthropic requires temperature = 1.0 when thinking is enabled
-			req.Temperature = 1.0
+			// Thinking is not compatible with temperature modifications; omit it
+			req.Temperature = 0
 			c.logger.Debug(ctx, "Enabled reasoning (thinking) tokens", map[string]interface{}{
 				"model":         c.Model,
 				"budget_tokens": params.LLMConfig.ReasoningBudget,
@@ -489,6 +491,7 @@ func (c *AnthropicClient) executeStreamingWithTools(
 				req.Thinking = &ReasoningSpec{
 					Type: "adaptive",
 				}
+				req.Temperature = 0 // thinking is not compatible with temperature
 				c.logger.Debug(ctx, "Enabled adaptive thinking for tools stream", map[string]interface{}{
 					"model":     c.Model,
 					"iteration": iteration + 1,
@@ -500,8 +503,7 @@ func (c *AnthropicClient) executeStreamingWithTools(
 				if params.LLMConfig.ReasoningBudget > 0 {
 					req.Thinking.BudgetTokens = params.LLMConfig.ReasoningBudget
 				}
-				// Anthropic requires temperature = 1.0 when thinking is enabled
-				req.Temperature = 1.0
+				req.Temperature = 0 // thinking is not compatible with temperature
 				c.logger.Debug(ctx, "Enabled reasoning (thinking) tokens for tools", map[string]interface{}{
 					"model":         c.Model,
 					"budget_tokens": params.LLMConfig.ReasoningBudget,
@@ -830,6 +832,7 @@ CRITICAL INSTRUCTIONS:
 			finalReq.Thinking = &ReasoningSpec{
 				Type: "adaptive",
 			}
+			finalReq.Temperature = 0 // thinking is not compatible with temperature
 			c.logger.Debug(ctx, "Getting final answer with adaptive thinking after tools", map[string]interface{}{
 				"model": c.Model,
 			})
@@ -840,8 +843,7 @@ CRITICAL INSTRUCTIONS:
 			if params.LLMConfig.ReasoningBudget > 0 {
 				finalReq.Thinking.BudgetTokens = params.LLMConfig.ReasoningBudget
 			}
-			// Anthropic requires temperature = 1.0 when thinking is enabled
-			finalReq.Temperature = 1.0
+			finalReq.Temperature = 0 // thinking is not compatible with temperature
 			c.logger.Debug(ctx, "Getting final answer with reasoning after tools", map[string]interface{}{
 				"model":         c.Model,
 				"budget_tokens": params.LLMConfig.ReasoningBudget,

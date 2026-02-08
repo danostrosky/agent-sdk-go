@@ -714,6 +714,7 @@ func TestSupportsAdaptiveThinking(t *testing.T) {
 		{"anthropic.claude-opus-4-6-v1:0", true},
 		{"us.anthropic.claude-opus-4-6-v1:0", true},
 		{"eu.anthropic.claude-opus-4-6-v1:0", true},
+		{"us.anthropic.claude-opus-4-6-v1", true}, // without :0 suffix
 		{"claude-opus-4-6@latest", true},
 
 		// Older models — should NOT support adaptive thinking

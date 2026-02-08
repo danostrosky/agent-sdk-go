@@ -304,8 +304,10 @@ func SupportsThinking(model string) bool {
 		normalizedModel = strings.TrimPrefix(model, "anthropic.")
 	}
 
-	// List of base model patterns that support thinking
-	supportedModels := []string{
+	// Base model prefixes that support thinking.
+	// We use HasPrefix so "claude-opus-4-6-v1:0" and "claude-opus-4-6-v1" both match
+	// the prefix "claude-opus-4-6".
+	supportedPrefixes := []string{
 		"claude-3-7-sonnet-20250219",
 		"claude-sonnet-4-20250514",
 		"claude-sonnet-4-5-20250929",
@@ -314,26 +316,18 @@ func SupportsThinking(model string) bool {
 		"claude-opus-4-5-20251101",
 		"claude-opus-4-6",
 		// Vertex AI format models
-		"claude-sonnet-4@20250514",
-		"claude-sonnet-4-v1@20250514",
-		"claude-sonnet-4-5@20250929",
-		"claude-opus-4@20250514",
-		"claude-opus-4-v1@20250514",
-		"claude-opus-4-1@20250805",
-		"claude-opus-4-5@20251101",
-		"claude-opus-4-6@latest",
-		// AWS Bedrock base patterns (without regional prefix)
-		"claude-3-7-sonnet-20250219-v1:0",
-		"claude-sonnet-4-20250514-v1:0",
-		"claude-sonnet-4-5-20250929-v1:0",
-		"claude-opus-4-20250514-v1:0",
-		"claude-opus-4-1-20250805-v1:0",
-		"claude-opus-4-5-20251101-v1:0",
-		"claude-opus-4-6-v1:0",
+		"claude-sonnet-4@",
+		"claude-sonnet-4-v1@",
+		"claude-sonnet-4-5@",
+		"claude-opus-4@",
+		"claude-opus-4-v1@",
+		"claude-opus-4-1@",
+		"claude-opus-4-5@",
+		"claude-opus-4-6@",
 	}
 
-	for _, supportedModel := range supportedModels {
-		if normalizedModel == supportedModel || model == supportedModel {
+	for _, prefix := range supportedPrefixes {
+		if strings.HasPrefix(normalizedModel, prefix) || strings.HasPrefix(model, prefix) {
 			return true
 		}
 	}
@@ -356,16 +350,13 @@ func SupportsAdaptiveThinking(model string) bool {
 		normalizedModel = strings.TrimPrefix(model, "anthropic.")
 	}
 
-	adaptiveModels := []string{
+	// Use prefix matching so "claude-opus-4-6-v1:0" and "claude-opus-4-6-v1" both match.
+	adaptivePrefixes := []string{
 		"claude-opus-4-6",
-		// Vertex AI format
-		"claude-opus-4-6@latest",
-		// AWS Bedrock base patterns (without regional prefix)
-		"claude-opus-4-6-v1:0",
 	}
 
-	for _, supportedModel := range adaptiveModels {
-		if normalizedModel == supportedModel || model == supportedModel {
+	for _, prefix := range adaptivePrefixes {
+		if strings.HasPrefix(normalizedModel, prefix) || strings.HasPrefix(model, prefix) {
 			return true
 		}
 	}
@@ -615,6 +606,8 @@ Return only the JSON object, with no additional text or markdown formatting.`, p
 			req.Thinking = &ReasoningSpec{
 				Type: "adaptive",
 			}
+			// Thinking is not compatible with temperature modifications; omit it
+			req.Temperature = 0
 			c.logger.Debug(ctx, "Enabled adaptive thinking", map[string]interface{}{
 				"model":     c.Model,
 				"max_tokens": req.MaxTokens,
@@ -626,8 +619,8 @@ Return only the JSON object, with no additional text or markdown formatting.`, p
 			if params.LLMConfig.ReasoningBudget > 0 {
 				req.Thinking.BudgetTokens = params.LLMConfig.ReasoningBudget
 			}
-			// Anthropic requires temperature = 1.0 when thinking is enabled
-			req.Temperature = 1.0
+			// Thinking is not compatible with temperature modifications; omit it
+			req.Temperature = 0
 			c.logger.Debug(ctx, "Enabled reasoning (thinking) tokens", map[string]interface{}{
 				"model":         c.Model,
 				"budget_tokens": params.LLMConfig.ReasoningBudget,
@@ -1195,6 +1188,7 @@ func (c *AnthropicClient) GenerateWithTools(ctx context.Context, prompt string, 
 				req.Thinking = &ReasoningSpec{
 					Type: "adaptive",
 				}
+				req.Temperature = 0 // thinking is not compatible with temperature
 				c.logger.Debug(ctx, "Enabled adaptive thinking for tools", map[string]interface{}{
 					"model":     c.Model,
 					"iteration": iteration + 1,
@@ -1206,7 +1200,7 @@ func (c *AnthropicClient) GenerateWithTools(ctx context.Context, prompt string, 
 				if params.LLMConfig.ReasoningBudget > 0 {
 					req.Thinking.BudgetTokens = params.LLMConfig.ReasoningBudget
 				}
-				req.Temperature = 1.0
+				req.Temperature = 0 // thinking is not compatible with temperature
 				c.logger.Debug(ctx, "Enabled reasoning (thinking) tokens for tools", map[string]interface{}{
 					"model":         c.Model,
 					"budget_tokens": params.LLMConfig.ReasoningBudget,
