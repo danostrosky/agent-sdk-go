@@ -75,12 +75,26 @@ func convertToSDKParams(req *CompletionRequest) sdkanthropic.MessageNewParams {
 	}
 
 	// Convert thinking/reasoning
-	if req.Thinking != nil && req.Thinking.Type == "enabled" {
-		budgetTokens := int64(req.Thinking.BudgetTokens)
-		if budgetTokens < 1024 {
-			budgetTokens = 1024
+	if req.Thinking != nil {
+		switch req.Thinking.Type {
+		case "adaptive":
+			params.Thinking = sdkanthropic.ThinkingConfigParamUnion{
+				OfAdaptive: &sdkanthropic.ThinkingConfigAdaptiveParam{},
+			}
+		case "enabled":
+			budgetTokens := int64(req.Thinking.BudgetTokens)
+			if budgetTokens < 1024 {
+				budgetTokens = 1024
+			}
+			params.Thinking = sdkanthropic.ThinkingConfigParamOfEnabled(budgetTokens)
 		}
-		params.Thinking = sdkanthropic.ThinkingConfigParamOfEnabled(budgetTokens)
+	}
+
+	// Convert effort / output config
+	if req.OutputConfig != nil && req.OutputConfig.Effort != "" {
+		params.OutputConfig = sdkanthropic.OutputConfigParam{
+			Effort: sdkanthropic.OutputConfigEffort(req.OutputConfig.Effort),
+		}
 	}
 
 	return params

@@ -272,6 +272,7 @@ const (
 	ClaudeOpus4    = "claude-opus-4-20250514"     // Latest Opus with thinking
 	ClaudeOpus41   = "claude-opus-4-1-20250805"   // Latest Opus 4.1
 	ClaudeOpus45   = "claude-opus-4-5-20251101"   // Latest Opus 4.5
+	ClaudeOpus46   = "claude-opus-4-6"           // Latest Opus 4.6 (supports adaptive thinking)
 
 	// AWS Bedrock model IDs
 	BedrockClaude35Haiku  = "anthropic.claude-3-5-haiku-20241022-v1:0"
@@ -283,6 +284,7 @@ const (
 	BedrockClaudeOpus4    = "anthropic.claude-opus-4-20250514-v1:0"
 	BedrockClaudeOpus41   = "anthropic.claude-opus-4-1-20250805-v1:0"
 	BedrockClaudeOpus45   = "anthropic.claude-opus-4-5-20251101-v1:0"
+	BedrockClaudeOpus46   = "anthropic.claude-opus-4-6-v1:0"
 )
 
 // SupportsThinking returns true if the model supports thinking tokens
@@ -310,6 +312,7 @@ func SupportsThinking(model string) bool {
 		"claude-opus-4-20250514",
 		"claude-opus-4-1-20250805",
 		"claude-opus-4-5-20251101",
+		"claude-opus-4-6",
 		// Vertex AI format models
 		"claude-sonnet-4@20250514",
 		"claude-sonnet-4-v1@20250514",
@@ -318,6 +321,7 @@ func SupportsThinking(model string) bool {
 		"claude-opus-4-v1@20250514",
 		"claude-opus-4-1@20250805",
 		"claude-opus-4-5@20251101",
+		"claude-opus-4-6@latest",
 		// AWS Bedrock base patterns (without regional prefix)
 		"claude-3-7-sonnet-20250219-v1:0",
 		"claude-sonnet-4-20250514-v1:0",
@@ -325,9 +329,42 @@ func SupportsThinking(model string) bool {
 		"claude-opus-4-20250514-v1:0",
 		"claude-opus-4-1-20250805-v1:0",
 		"claude-opus-4-5-20251101-v1:0",
+		"claude-opus-4-6-v1:0",
 	}
 
 	for _, supportedModel := range supportedModels {
+		if normalizedModel == supportedModel || model == supportedModel {
+			return true
+		}
+	}
+	return false
+}
+
+// SupportsAdaptiveThinking returns true if the model supports adaptive thinking mode.
+// Only Claude Opus 4.6+ supports adaptive thinking; older models use "enabled" + budget_tokens.
+func SupportsAdaptiveThinking(model string) bool {
+	// Normalize the model name by removing regional prefixes
+	normalizedModel := model
+
+	// Handle Bedrock models with regional prefixes (us., eu., ap., etc.)
+	if strings.Contains(model, ".anthropic.claude") {
+		parts := strings.SplitN(model, ".anthropic.", 2)
+		if len(parts) == 2 {
+			normalizedModel = parts[1]
+		}
+	} else if strings.HasPrefix(model, "anthropic.claude") {
+		normalizedModel = strings.TrimPrefix(model, "anthropic.")
+	}
+
+	adaptiveModels := []string{
+		"claude-opus-4-6",
+		// Vertex AI format
+		"claude-opus-4-6@latest",
+		// AWS Bedrock base patterns (without regional prefix)
+		"claude-opus-4-6-v1:0",
+	}
+
+	for _, supportedModel := range adaptiveModels {
 		if normalizedModel == supportedModel || model == supportedModel {
 			return true
 		}
@@ -373,6 +410,12 @@ type CompletionRequest struct {
 	MetadataKey      string         `json:"metadata,omitempty"`
 	AnthropicVersion string         `json:"anthropic_version,omitempty"` // For Vertex AI
 	Thinking         *ReasoningSpec `json:"thinking,omitempty"`          // Keep "thinking" for API compatibility
+	OutputConfig     *OutputConfig  `json:"output_config,omitempty"`     // Output configuration (effort level)
+}
+
+// OutputConfig represents the output configuration for Anthropic API
+type OutputConfig struct {
+	Effort string `json:"effort,omitempty"` // Effort level: "low", "medium", "high", "max"
 }
 
 // ReasoningSpec represents the reasoning configuration for Anthropic API
@@ -566,25 +609,46 @@ Return only the JSON object, with no additional text or markdown formatting.`, p
 	}
 
 	// Handle reasoning/thinking if supported
-	if params.LLMConfig != nil && params.LLMConfig.EnableReasoning && SupportsThinking(c.Model) {
-		req.Thinking = &ReasoningSpec{
-			Type: "enabled",
+	if params.LLMConfig != nil && params.LLMConfig.EnableReasoning {
+		if SupportsAdaptiveThinking(c.Model) {
+			// Opus 4.6+ uses adaptive thinking — model decides when/how much to think
+			req.Thinking = &ReasoningSpec{
+				Type: "adaptive",
+			}
+			c.logger.Debug(ctx, "Enabled adaptive thinking", map[string]interface{}{
+				"model":     c.Model,
+				"max_tokens": req.MaxTokens,
+			})
+		} else if SupportsThinking(c.Model) {
+			req.Thinking = &ReasoningSpec{
+				Type: "enabled",
+			}
+			if params.LLMConfig.ReasoningBudget > 0 {
+				req.Thinking.BudgetTokens = params.LLMConfig.ReasoningBudget
+			}
+			// Anthropic requires temperature = 1.0 when thinking is enabled
+			req.Temperature = 1.0
+			c.logger.Debug(ctx, "Enabled reasoning (thinking) tokens", map[string]interface{}{
+				"model":         c.Model,
+				"budget_tokens": params.LLMConfig.ReasoningBudget,
+				"max_tokens":    req.MaxTokens,
+				"temperature":   req.Temperature,
+			})
+		} else {
+			c.logger.Warn(ctx, "Thinking tokens not supported by this model", map[string]interface{}{
+				"model":            c.Model,
+				"supported_models": []string{"claude-3-7-sonnet-20250219", "claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-opus-4-1-20250805", "claude-opus-4-6"},
+			})
 		}
-		if params.LLMConfig.ReasoningBudget > 0 {
-			req.Thinking.BudgetTokens = params.LLMConfig.ReasoningBudget
+	}
+
+	// Handle effort level
+	if params.LLMConfig != nil && params.LLMConfig.Effort != "" {
+		req.OutputConfig = &OutputConfig{
+			Effort: params.LLMConfig.Effort,
 		}
-		// Anthropic requires temperature = 1.0 when thinking is enabled
-		req.Temperature = 1.0
-		c.logger.Debug(ctx, "Enabled reasoning (thinking) tokens", map[string]interface{}{
-			"model":         c.Model,
-			"budget_tokens": params.LLMConfig.ReasoningBudget,
-			"max_tokens":    req.MaxTokens,
-			"temperature":   req.Temperature, // Show override
-		})
-	} else if params.LLMConfig != nil && params.LLMConfig.EnableReasoning {
-		c.logger.Warn(ctx, "Thinking tokens not supported by this model", map[string]interface{}{
-			"model":            c.Model,
-			"supported_models": []string{"claude-3-7-sonnet-20250219", "claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-opus-4-1-20250805"},
+		c.logger.Debug(ctx, "Set effort level", map[string]interface{}{
+			"effort": params.LLMConfig.Effort,
 		})
 	}
 
@@ -1125,9 +1189,37 @@ func (c *AnthropicClient) GenerateWithTools(ctx context.Context, prompt string, 
 			c.logger.Debug(ctx, "Added system message for structured output", nil)
 		}
 
-		// Add reasoning parameter if available
-		if params.LLMConfig != nil && params.LLMConfig.Reasoning != "" {
-			c.logger.Debug(ctx, "Reasoning mode not supported in current API version", map[string]interface{}{"reasoning": params.LLMConfig.Reasoning})
+		// Handle reasoning/thinking if supported
+		if params.LLMConfig != nil && params.LLMConfig.EnableReasoning {
+			if SupportsAdaptiveThinking(c.Model) {
+				req.Thinking = &ReasoningSpec{
+					Type: "adaptive",
+				}
+				c.logger.Debug(ctx, "Enabled adaptive thinking for tools", map[string]interface{}{
+					"model":     c.Model,
+					"iteration": iteration + 1,
+				})
+			} else if SupportsThinking(c.Model) {
+				req.Thinking = &ReasoningSpec{
+					Type: "enabled",
+				}
+				if params.LLMConfig.ReasoningBudget > 0 {
+					req.Thinking.BudgetTokens = params.LLMConfig.ReasoningBudget
+				}
+				req.Temperature = 1.0
+				c.logger.Debug(ctx, "Enabled reasoning (thinking) tokens for tools", map[string]interface{}{
+					"model":         c.Model,
+					"budget_tokens": params.LLMConfig.ReasoningBudget,
+					"iteration":     iteration + 1,
+				})
+			}
+		}
+
+		// Handle effort level
+		if params.LLMConfig != nil && params.LLMConfig.Effort != "" {
+			req.OutputConfig = &OutputConfig{
+				Effort: params.LLMConfig.Effort,
+			}
 		}
 
 		// Send request

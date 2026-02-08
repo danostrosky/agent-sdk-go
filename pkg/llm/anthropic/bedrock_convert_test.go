@@ -621,3 +621,89 @@ func TestConvertToSDKParams_NoTemperature(t *testing.T) {
 	// Temperature should not be set when it's 0
 	assert.Equal(t, float64(0), params.Temperature.Value)
 }
+
+func TestConvertToSDKParams_AdaptiveThinking(t *testing.T) {
+	req := &CompletionRequest{
+		Model:     "claude-opus-4-6",
+		MaxTokens: 16000,
+		Messages:  []Message{{Role: "user", Content: "Hello"}},
+		Thinking: &ReasoningSpec{
+			Type: "adaptive",
+		},
+	}
+
+	params := convertToSDKParams(req)
+
+	require.NotNil(t, params.Thinking.OfAdaptive)
+	assert.Nil(t, params.Thinking.OfEnabled)
+}
+
+func TestConvertToSDKParams_Effort(t *testing.T) {
+	req := &CompletionRequest{
+		Model:     "claude-opus-4-6",
+		MaxTokens: 16000,
+		Messages:  []Message{{Role: "user", Content: "Hello"}},
+		OutputConfig: &OutputConfig{
+			Effort: "medium",
+		},
+	}
+
+	params := convertToSDKParams(req)
+
+	assert.Equal(t, sdkanthropic.OutputConfigEffort("medium"), params.OutputConfig.Effort)
+}
+
+func TestConvertToSDKParams_AdaptiveThinkingWithEffort(t *testing.T) {
+	req := &CompletionRequest{
+		Model:     "claude-opus-4-6",
+		MaxTokens: 16000,
+		Messages:  []Message{{Role: "user", Content: "Hello"}},
+		Thinking: &ReasoningSpec{
+			Type: "adaptive",
+		},
+		OutputConfig: &OutputConfig{
+			Effort: "max",
+		},
+	}
+
+	params := convertToSDKParams(req)
+
+	require.NotNil(t, params.Thinking.OfAdaptive)
+	assert.Nil(t, params.Thinking.OfEnabled)
+	assert.Equal(t, sdkanthropic.OutputConfigEffortMax, params.OutputConfig.Effort)
+}
+
+func TestSupportsAdaptiveThinking(t *testing.T) {
+	tests := []struct {
+		model    string
+		expected bool
+	}{
+		// Opus 4.6 variants — should support adaptive thinking
+		{"claude-opus-4-6", true},
+		{"anthropic.claude-opus-4-6-v1:0", true},
+		{"us.anthropic.claude-opus-4-6-v1:0", true},
+		{"eu.anthropic.claude-opus-4-6-v1:0", true},
+		{"claude-opus-4-6@latest", true},
+
+		// Older models — should NOT support adaptive thinking
+		{"claude-3-7-sonnet-20250219", false},
+		{"claude-sonnet-4-20250514", false},
+		{"claude-opus-4-20250514", false},
+		{"claude-opus-4-1-20250805", false},
+		{"claude-opus-4-5-20251101", false},
+		{"claude-3-5-sonnet-latest", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			assert.Equal(t, tt.expected, SupportsAdaptiveThinking(tt.model))
+		})
+	}
+}
+
+func TestSupportsThinking_IncludesOpus46(t *testing.T) {
+	// Opus 4.6 should also appear in SupportsThinking (it's a superset)
+	assert.True(t, SupportsThinking("claude-opus-4-6"))
+	assert.True(t, SupportsThinking("anthropic.claude-opus-4-6-v1:0"))
+	assert.True(t, SupportsThinking("us.anthropic.claude-opus-4-6-v1:0"))
+}

@@ -86,7 +86,15 @@ func (c *AnthropicClient) GenerateStream(
 
 	// Add reasoning (thinking) support if enabled and model supports it
 	if params.LLMConfig != nil && params.LLMConfig.EnableReasoning {
-		if SupportsThinking(c.Model) {
+		if SupportsAdaptiveThinking(c.Model) {
+			req.Thinking = &ReasoningSpec{
+				Type: "adaptive",
+			}
+			c.logger.Debug(ctx, "Enabled adaptive thinking for stream", map[string]interface{}{
+				"model":     c.Model,
+				"max_tokens": maxTokens,
+			})
+		} else if SupportsThinking(c.Model) {
 			req.Thinking = &ReasoningSpec{
 				Type: "enabled",
 			}
@@ -99,13 +107,20 @@ func (c *AnthropicClient) GenerateStream(
 				"model":         c.Model,
 				"budget_tokens": params.LLMConfig.ReasoningBudget,
 				"max_tokens":    maxTokens,
-				"temperature":   req.Temperature, // Show override
+				"temperature":   req.Temperature,
 			})
 		} else {
 			c.logger.Warn(ctx, "Thinking tokens not supported by this model", map[string]interface{}{
 				"model":            c.Model,
-				"supported_models": []string{"claude-3-7-sonnet-20250219", "claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-opus-4-1-20250805"},
+				"supported_models": []string{"claude-3-7-sonnet-20250219", "claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-opus-4-1-20250805", "claude-opus-4-6"},
 			})
+		}
+	}
+
+	// Handle effort level
+	if params.LLMConfig != nil && params.LLMConfig.Effort != "" {
+		req.OutputConfig = &OutputConfig{
+			Effort: params.LLMConfig.Effort,
 		}
 	}
 
@@ -470,7 +485,15 @@ func (c *AnthropicClient) executeStreamingWithTools(
 
 		// Add reasoning (thinking) support if enabled and model supports it
 		if params.LLMConfig != nil && params.LLMConfig.EnableReasoning {
-			if SupportsThinking(c.Model) {
+			if SupportsAdaptiveThinking(c.Model) {
+				req.Thinking = &ReasoningSpec{
+					Type: "adaptive",
+				}
+				c.logger.Debug(ctx, "Enabled adaptive thinking for tools stream", map[string]interface{}{
+					"model":     c.Model,
+					"iteration": iteration + 1,
+				})
+			} else if SupportsThinking(c.Model) {
 				req.Thinking = &ReasoningSpec{
 					Type: "enabled",
 				}
@@ -487,6 +510,13 @@ func (c *AnthropicClient) executeStreamingWithTools(
 					"iteration":     iteration + 1,
 					"maxIterations": maxIterations,
 				})
+			}
+		}
+
+		// Handle effort level
+		if params.LLMConfig != nil && params.LLMConfig.Effort != "" {
+			req.OutputConfig = &OutputConfig{
+				Effort: params.LLMConfig.Effort,
 			}
 		}
 
@@ -796,7 +826,14 @@ CRITICAL INSTRUCTIONS:
 
 	// Add reasoning (thinking) support if enabled and model supports it
 	if params.LLMConfig != nil && params.LLMConfig.EnableReasoning {
-		if SupportsThinking(c.Model) {
+		if SupportsAdaptiveThinking(c.Model) {
+			finalReq.Thinking = &ReasoningSpec{
+				Type: "adaptive",
+			}
+			c.logger.Debug(ctx, "Getting final answer with adaptive thinking after tools", map[string]interface{}{
+				"model": c.Model,
+			})
+		} else if SupportsThinking(c.Model) {
 			finalReq.Thinking = &ReasoningSpec{
 				Type: "enabled",
 			}
@@ -811,6 +848,13 @@ CRITICAL INSTRUCTIONS:
 				"max_tokens":    maxTokens,
 				"temperature":   finalReq.Temperature,
 			})
+		}
+	}
+
+	// Handle effort level for final request
+	if params.LLMConfig != nil && params.LLMConfig.Effort != "" {
+		finalReq.OutputConfig = &OutputConfig{
+			Effort: params.LLMConfig.Effort,
 		}
 	}
 
