@@ -104,6 +104,14 @@ type Config struct {
 			ServiceName       string
 			CollectorEndpoint string
 		}
+
+		// Braintrust configuration
+		Braintrust struct {
+			Enabled bool
+			APIKey  string
+			Project string
+			APIURL  string
+		}
 	}
 
 	// Multitenancy configuration
@@ -194,6 +202,11 @@ func LoadFromEnv() *Config {
 	config.Tracing.OpenTelemetry.Enabled = getEnvBool("OTEL_ENABLED", false)
 	config.Tracing.OpenTelemetry.ServiceName = getEnv("OTEL_SERVICE_NAME", "agent-sdk")
 	config.Tracing.OpenTelemetry.CollectorEndpoint = getEnv("OTEL_COLLECTOR_ENDPOINT", "localhost:4317")
+
+	config.Tracing.Braintrust.Enabled = getEnvBool("BRAINTRUST_ENABLED", false)
+	config.Tracing.Braintrust.APIKey = getEnv("BRAINTRUST_API_KEY", "")
+	config.Tracing.Braintrust.Project = getEnv("BRAINTRUST_PROJECT", "")
+	config.Tracing.Braintrust.APIURL = getEnv("BRAINTRUST_API_URL", "")
 
 	// Multitenancy configuration
 	config.Multitenancy.Enabled = getEnvBool("MULTITENANCY_ENABLED", false)

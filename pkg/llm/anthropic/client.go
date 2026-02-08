@@ -16,6 +16,7 @@ import (
 	"github.com/Ingenimax/agent-sdk-go/pkg/logging"
 	"github.com/Ingenimax/agent-sdk-go/pkg/multitenancy"
 	"github.com/Ingenimax/agent-sdk-go/pkg/retry"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
@@ -30,6 +31,7 @@ type AnthropicClient struct {
 	vertexRetryExecutor *VertexRetryExecutor
 	VertexConfig        *VertexConfig
 	BedrockConfig       *BedrockConfig
+	bedrockSDKOptions   []option.RequestOption
 }
 
 // Option represents an option for configuring the Anthropic client
@@ -99,6 +101,16 @@ func WithBaseURL(baseURL string) Option {
 func WithHTTPClient(httpClient *http.Client) Option {
 	return func(c *AnthropicClient) {
 		c.HTTPClient = httpClient
+	}
+}
+
+// WithBedrockSDKOptions adds extra option.RequestOption values that will be
+// passed to the Anthropic SDK client when creating a Bedrock connection.
+// This is useful for adding middleware such as Braintrust tracing.
+// Note: call this BEFORE WithBedrockAWSConfig.
+func WithBedrockSDKOptions(opts ...option.RequestOption) Option {
+	return func(c *AnthropicClient) {
+		c.bedrockSDKOptions = append(c.bedrockSDKOptions, opts...)
 	}
 }
 
@@ -208,7 +220,7 @@ func WithGoogleApplicationCredentials(region, projectID, credentialsContent stri
 func WithBedrockAWSConfig(awsConfig aws.Config) Option {
 	return func(c *AnthropicClient) {
 		ctx := context.Background()
-		bedrockConfig, err := NewBedrockConfigWithAWSConfig(ctx, awsConfig)
+		bedrockConfig, err := NewBedrockConfigWithAWSConfig(ctx, awsConfig, c.bedrockSDKOptions...)
 		if err != nil {
 			c.logger.Error(ctx, "Failed to configure Bedrock with AWS config", map[string]interface{}{
 				"error":  err.Error(),

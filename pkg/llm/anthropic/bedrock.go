@@ -26,16 +26,17 @@ type BedrockConfig struct {
 
 // NewBedrockConfigWithAWSConfig creates a new BedrockConfig from an existing AWS config
 // This is the primary way to configure Bedrock - users configure credentials and settings
-// through the aws.Config itself using config.LoadDefaultConfig() or other AWS SDK methods
-func NewBedrockConfigWithAWSConfig(ctx context.Context, awsConfig aws.Config) (*BedrockConfig, error) {
+// through the aws.Config itself using config.LoadDefaultConfig() or other AWS SDK methods.
+// Additional SDK options (e.g., tracing middleware) can be passed via sdkOptions.
+func NewBedrockConfigWithAWSConfig(ctx context.Context, awsConfig aws.Config, sdkOptions ...option.RequestOption) (*BedrockConfig, error) {
 	if awsConfig.Region == "" {
 		return nil, fmt.Errorf("region is required in AWS config")
 	}
 
-	// Create Anthropic SDK client with Bedrock middleware
-	sdkClient := sdkanthropic.NewClient(
-		bedrock.WithConfig(awsConfig),
-	)
+	// Create Anthropic SDK client with Bedrock middleware and any additional options
+	clientOpts := []option.RequestOption{bedrock.WithConfig(awsConfig)}
+	clientOpts = append(clientOpts, sdkOptions...)
+	sdkClient := sdkanthropic.NewClient(clientOpts...)
 
 	bedrockConfig := &BedrockConfig{
 		Enabled:   true,
