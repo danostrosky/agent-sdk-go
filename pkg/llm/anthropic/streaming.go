@@ -976,7 +976,7 @@ func (c *AnthropicClient) executeBedrockStreaming(
 	sdkParams := convertToSDKParams(req)
 
 	// Invoke Bedrock streaming via SDK
-	stream, err := c.BedrockConfig.InvokeModelStream(ctx, c.Model, sdkParams)
+	stream, err := c.BedrockConfig.InvokeModelStream(ctx, c.Model, sdkParams, extraRequestOptions(req)...)
 	if err != nil {
 		return fmt.Errorf("failed to invoke Bedrock streaming: %w", err)
 	}

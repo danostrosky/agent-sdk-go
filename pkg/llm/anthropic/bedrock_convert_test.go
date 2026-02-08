@@ -632,10 +632,13 @@ func TestConvertToSDKParams_AdaptiveThinking(t *testing.T) {
 		},
 	}
 
+	// Adaptive thinking is NOT handled in convertToSDKParams (SDK v1.4.0 lacks OfAdaptive);
+	// it's injected via extraRequestOptions using option.WithJSONSet.
 	params := convertToSDKParams(req)
+	assert.Nil(t, params.Thinking.OfEnabled) // Should NOT be set as "enabled"
 
-	require.NotNil(t, params.Thinking.OfAdaptive)
-	assert.Nil(t, params.Thinking.OfEnabled)
+	opts := extraRequestOptions(req)
+	assert.Len(t, opts, 1) // One option for adaptive thinking
 }
 
 func TestConvertToSDKParams_Effort(t *testing.T) {
@@ -648,9 +651,9 @@ func TestConvertToSDKParams_Effort(t *testing.T) {
 		},
 	}
 
-	params := convertToSDKParams(req)
-
-	assert.Equal(t, sdkanthropic.OutputConfigEffort("medium"), params.OutputConfig.Effort)
+	// Effort is handled via extraRequestOptions (SDK v1.4.0 lacks OutputConfigParam).
+	opts := extraRequestOptions(req)
+	assert.Len(t, opts, 1) // One option for effort
 }
 
 func TestConvertToSDKParams_AdaptiveThinkingWithEffort(t *testing.T) {
@@ -666,11 +669,39 @@ func TestConvertToSDKParams_AdaptiveThinkingWithEffort(t *testing.T) {
 		},
 	}
 
+	// Both adaptive thinking and effort are handled via extraRequestOptions.
 	params := convertToSDKParams(req)
-
-	require.NotNil(t, params.Thinking.OfAdaptive)
 	assert.Nil(t, params.Thinking.OfEnabled)
-	assert.Equal(t, sdkanthropic.OutputConfigEffortMax, params.OutputConfig.Effort)
+
+	opts := extraRequestOptions(req)
+	assert.Len(t, opts, 2) // One for adaptive thinking, one for effort
+}
+
+func TestExtraRequestOptions_NoOptions(t *testing.T) {
+	req := &CompletionRequest{
+		Model:     "claude-3-5-sonnet-latest",
+		MaxTokens: 1024,
+		Messages:  []Message{{Role: "user", Content: "Hello"}},
+	}
+
+	opts := extraRequestOptions(req)
+	assert.Len(t, opts, 0)
+}
+
+func TestExtraRequestOptions_EnabledThinkingNotIncluded(t *testing.T) {
+	// "enabled" thinking is handled natively by convertToSDKParams, NOT extraRequestOptions
+	req := &CompletionRequest{
+		Model:     "claude-3-7-sonnet-20250219",
+		MaxTokens: 16000,
+		Messages:  []Message{{Role: "user", Content: "Hello"}},
+		Thinking: &ReasoningSpec{
+			Type:         "enabled",
+			BudgetTokens: 8000,
+		},
+	}
+
+	opts := extraRequestOptions(req)
+	assert.Len(t, opts, 0) // "enabled" is NOT handled here
 }
 
 func TestSupportsAdaptiveThinking(t *testing.T) {

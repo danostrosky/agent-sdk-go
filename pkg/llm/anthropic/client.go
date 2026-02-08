@@ -673,7 +673,7 @@ Return only the JSON object, with no additional text or markdown formatting.`, p
 		// Bedrock uses the official Anthropic SDK with Bedrock middleware
 		if c.BedrockConfig != nil && c.BedrockConfig.Enabled {
 			sdkParams := convertToSDKParams(&req)
-			sdkResp, err := c.BedrockConfig.InvokeModel(ctx, c.Model, sdkParams)
+			sdkResp, err := c.BedrockConfig.InvokeModel(ctx, c.Model, sdkParams, extraRequestOptions(&req)...)
 			if err != nil {
 				return fmt.Errorf("failed to invoke Bedrock model: %w", err)
 			}
@@ -904,7 +904,7 @@ func (c *AnthropicClient) Chat(ctx context.Context, messages []llm.Message, para
 		// Bedrock uses the official Anthropic SDK with Bedrock middleware
 		if c.BedrockConfig != nil && c.BedrockConfig.Enabled {
 			sdkParams := convertToSDKParams(&req)
-			sdkResp, err := c.BedrockConfig.InvokeModel(ctx, c.Model, sdkParams)
+			sdkResp, err := c.BedrockConfig.InvokeModel(ctx, c.Model, sdkParams, extraRequestOptions(&req)...)
 			if err != nil {
 				return fmt.Errorf("failed to invoke Bedrock model for chat: %w", err)
 			}
@@ -1242,7 +1242,7 @@ func (c *AnthropicClient) GenerateWithTools(ctx context.Context, prompt string, 
 			// Bedrock uses the official Anthropic SDK with Bedrock middleware
 			if c.BedrockConfig != nil && c.BedrockConfig.Enabled {
 				sdkParams := convertToSDKParams(&req)
-				sdkResp, err := c.BedrockConfig.InvokeModel(ctx, c.Model, sdkParams)
+				sdkResp, err := c.BedrockConfig.InvokeModel(ctx, c.Model, sdkParams, extraRequestOptions(&req)...)
 				if err != nil {
 					return fmt.Errorf("failed to invoke Bedrock model with tools (iteration %d): %w", iteration+1, err)
 				}
@@ -1560,7 +1560,7 @@ CRITICAL INSTRUCTIONS:
 	// Bedrock uses the official Anthropic SDK with Bedrock middleware
 	if c.BedrockConfig != nil && c.BedrockConfig.Enabled {
 		sdkParams := convertToSDKParams(&finalReq)
-		sdkResp, err := c.BedrockConfig.InvokeModel(ctx, c.Model, sdkParams)
+		sdkResp, err := c.BedrockConfig.InvokeModel(ctx, c.Model, sdkParams, extraRequestOptions(&finalReq)...)
 		if err != nil {
 			return "", fmt.Errorf("failed to invoke Bedrock model for final request: %w", err)
 		}

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	sdkanthropic "github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 
 	"github.com/Ingenimax/agent-sdk-go/pkg/interfaces"
 )
@@ -74,30 +75,38 @@ func convertToSDKParams(req *CompletionRequest) sdkanthropic.MessageNewParams {
 		params.ToolChoice = convertToolChoiceToSDK(req.ToolChoice)
 	}
 
-	// Convert thinking/reasoning
-	if req.Thinking != nil {
-		switch req.Thinking.Type {
-		case "adaptive":
-			params.Thinking = sdkanthropic.ThinkingConfigParamUnion{
-				OfAdaptive: &sdkanthropic.ThinkingConfigAdaptiveParam{},
-			}
-		case "enabled":
-			budgetTokens := int64(req.Thinking.BudgetTokens)
-			if budgetTokens < 1024 {
-				budgetTokens = 1024
-			}
-			params.Thinking = sdkanthropic.ThinkingConfigParamOfEnabled(budgetTokens)
+	// Convert thinking/reasoning — "enabled" mode uses native SDK type;
+	// "adaptive" mode is handled via WithJSONSet in extraRequestOptions
+	// because the SDK v1.4.0 type system doesn't include OfAdaptive.
+	if req.Thinking != nil && req.Thinking.Type == "enabled" {
+		budgetTokens := int64(req.Thinking.BudgetTokens)
+		if budgetTokens < 1024 {
+			budgetTokens = 1024
 		}
-	}
-
-	// Convert effort / output config
-	if req.OutputConfig != nil && req.OutputConfig.Effort != "" {
-		params.OutputConfig = sdkanthropic.OutputConfigParam{
-			Effort: sdkanthropic.OutputConfigEffort(req.OutputConfig.Effort),
-		}
+		params.Thinking = sdkanthropic.ThinkingConfigParamOfEnabled(budgetTokens)
 	}
 
 	return params
+}
+
+// extraRequestOptions returns per-request SDK options for features that the
+// current SDK type system does not support natively (adaptive thinking, effort).
+// These options use WithJSONSet to inject the fields into the serialised body
+// before the Bedrock middleware processes it.
+func extraRequestOptions(req *CompletionRequest) []option.RequestOption {
+	var opts []option.RequestOption
+
+	// Adaptive thinking — inject {"thinking":{"type":"adaptive"}} via JSON
+	if req.Thinking != nil && req.Thinking.Type == "adaptive" {
+		opts = append(opts, option.WithJSONSet("thinking", map[string]string{"type": "adaptive"}))
+	}
+
+	// Effort / output_config
+	if req.OutputConfig != nil && req.OutputConfig.Effort != "" {
+		opts = append(opts, option.WithJSONSet("output_config", map[string]string{"effort": req.OutputConfig.Effort}))
+	}
+
+	return opts
 }
 
 // convertToolToSDK converts an internal Tool to SDK ToolUnionParam

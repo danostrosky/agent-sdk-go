@@ -7,6 +7,7 @@ import (
 	"github.com/Ingenimax/agent-sdk-go/pkg/logging"
 	sdkanthropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/bedrock"
+	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	"github.com/aws/aws-sdk-go-v2/aws"
 )
@@ -52,7 +53,7 @@ func NewBedrockConfigWithAWSConfig(ctx context.Context, awsConfig aws.Config) (*
 }
 
 // InvokeModel invokes a Bedrock model using the official Anthropic SDK (non-streaming)
-func (bc *BedrockConfig) InvokeModel(ctx context.Context, modelID string, params sdkanthropic.MessageNewParams) (*sdkanthropic.Message, error) {
+func (bc *BedrockConfig) InvokeModel(ctx context.Context, modelID string, params sdkanthropic.MessageNewParams, reqOpts ...option.RequestOption) (*sdkanthropic.Message, error) {
 	if !bc.Enabled {
 		return nil, fmt.Errorf("bedrock is not enabled")
 	}
@@ -65,7 +66,7 @@ func (bc *BedrockConfig) InvokeModel(ctx context.Context, modelID string, params
 		"region":  bc.Region,
 	})
 
-	msg, err := bc.sdkClient.Messages.New(ctx, params)
+	msg, err := bc.sdkClient.Messages.New(ctx, params, reqOpts...)
 	if err != nil {
 		bc.logger.Error(ctx, "Failed to invoke Bedrock model", map[string]interface{}{
 			"error":   err.Error(),
@@ -86,7 +87,7 @@ func (bc *BedrockConfig) InvokeModel(ctx context.Context, modelID string, params
 }
 
 // InvokeModelStream invokes a Bedrock model with streaming using the official Anthropic SDK
-func (bc *BedrockConfig) InvokeModelStream(ctx context.Context, modelID string, params sdkanthropic.MessageNewParams) (*ssestream.Stream[sdkanthropic.MessageStreamEventUnion], error) {
+func (bc *BedrockConfig) InvokeModelStream(ctx context.Context, modelID string, params sdkanthropic.MessageNewParams, reqOpts ...option.RequestOption) (*ssestream.Stream[sdkanthropic.MessageStreamEventUnion], error) {
 	if !bc.Enabled {
 		return nil, fmt.Errorf("bedrock is not enabled")
 	}
@@ -99,7 +100,7 @@ func (bc *BedrockConfig) InvokeModelStream(ctx context.Context, modelID string, 
 		"region":  bc.Region,
 	})
 
-	stream := bc.sdkClient.Messages.NewStreaming(ctx, params)
+	stream := bc.sdkClient.Messages.NewStreaming(ctx, params, reqOpts...)
 
 	// Check for immediate errors
 	if stream.Err() != nil {
