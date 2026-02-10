@@ -62,6 +62,8 @@ type LLMConfig struct {
 	Reasoning        string   // Reasoning mode (minimal, low, medium, high) to control reasoning effort
 	EnableReasoning  bool     // Enable native reasoning tokens (Anthropic thinking/OpenAI o1)
 	ReasoningBudget  int      // Optional token budget for reasoning (Anthropic only), minimum 1024
+	ThinkingMode     string   // Thinking mode: "" (disabled), "enabled" (manual/legacy), "adaptive" (Opus 4.6+)
+	Effort           string   // Effort level for adaptive thinking: "low", "medium", "high", "max"
 }
 
 // WithMaxIterations creates a GenerateOption to set the maximum number of tool-calling iterations
@@ -92,6 +94,28 @@ func WithReasoning(enabled bool, budget ...int) GenerateOption {
 		if len(budget) > 0 {
 			options.LLMConfig.ReasoningBudget = budget[0]
 		}
+	}
+}
+
+// WithAdaptiveThinking creates a GenerateOption to enable adaptive thinking (Opus 4.6+)
+// Adaptive thinking lets the model dynamically decide when and how much to think.
+func WithAdaptiveThinking() GenerateOption {
+	return func(options *GenerateOptions) {
+		if options.LLMConfig == nil {
+			options.LLMConfig = &LLMConfig{}
+		}
+		options.LLMConfig.ThinkingMode = "adaptive"
+	}
+}
+
+// WithEffort creates a GenerateOption to set the effort level for thinking.
+// Valid values: "low", "medium", "high", "max".
+func WithEffort(effort string) GenerateOption {
+	return func(options *GenerateOptions) {
+		if options.LLMConfig == nil {
+			options.LLMConfig = &LLMConfig{}
+		}
+		options.LLMConfig.Effort = effort
 	}
 }
 

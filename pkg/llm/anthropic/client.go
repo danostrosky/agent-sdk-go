@@ -272,6 +272,7 @@ const (
 	ClaudeOpus4    = "claude-opus-4-20250514"     // Latest Opus with thinking
 	ClaudeOpus41   = "claude-opus-4-1-20250805"   // Latest Opus 4.1
 	ClaudeOpus45   = "claude-opus-4-5-20251101"   // Latest Opus 4.5
+	ClaudeOpus46   = "claude-opus-4-6-20260115"   // Latest Opus 4.6 with adaptive thinking
 
 	// AWS Bedrock model IDs
 	BedrockClaude35Haiku  = "anthropic.claude-3-5-haiku-20241022-v1:0"
@@ -283,6 +284,7 @@ const (
 	BedrockClaudeOpus4    = "anthropic.claude-opus-4-20250514-v1:0"
 	BedrockClaudeOpus41   = "anthropic.claude-opus-4-1-20250805-v1:0"
 	BedrockClaudeOpus45   = "anthropic.claude-opus-4-5-20251101-v1:0"
+	BedrockClaudeOpus46   = "anthropic.claude-opus-4-6-v1"
 )
 
 // SupportsThinking returns true if the model supports thinking tokens
@@ -310,6 +312,7 @@ func SupportsThinking(model string) bool {
 		"claude-opus-4-20250514",
 		"claude-opus-4-1-20250805",
 		"claude-opus-4-5-20251101",
+		"claude-opus-4-6-20260115",
 		// Vertex AI format models
 		"claude-sonnet-4@20250514",
 		"claude-sonnet-4-v1@20250514",
@@ -318,6 +321,7 @@ func SupportsThinking(model string) bool {
 		"claude-opus-4-v1@20250514",
 		"claude-opus-4-1@20250805",
 		"claude-opus-4-5@20251101",
+		"claude-opus-4-6@20260115",
 		// AWS Bedrock base patterns (without regional prefix)
 		"claude-3-7-sonnet-20250219-v1:0",
 		"claude-sonnet-4-20250514-v1:0",
@@ -325,6 +329,43 @@ func SupportsThinking(model string) bool {
 		"claude-opus-4-20250514-v1:0",
 		"claude-opus-4-1-20250805-v1:0",
 		"claude-opus-4-5-20251101-v1:0",
+		"claude-opus-4-6-20260115-v1:0",
+		// Bedrock shorthand (no date suffix)
+		"claude-opus-4-6-v1",
+	}
+
+	for _, supportedModel := range supportedModels {
+		if normalizedModel == supportedModel || model == supportedModel {
+			return true
+		}
+	}
+	return false
+}
+
+// SupportsAdaptiveThinking returns true if the model supports adaptive thinking (Opus 4.6+)
+func SupportsAdaptiveThinking(model string) bool {
+	// Normalize the model name by removing regional prefixes and extracting base model
+	normalizedModel := model
+
+	// Handle Bedrock models with regional prefixes (us., eu., ap., etc.)
+	if strings.Contains(model, ".anthropic.claude") {
+		parts := strings.SplitN(model, ".anthropic.", 2)
+		if len(parts) == 2 {
+			normalizedModel = parts[1]
+		}
+	} else if strings.HasPrefix(model, "anthropic.claude") {
+		normalizedModel = strings.TrimPrefix(model, "anthropic.")
+	}
+
+	// List of base model patterns that support adaptive thinking
+	supportedModels := []string{
+		"claude-opus-4-6-20260115",
+		// Vertex AI format
+		"claude-opus-4-6@20260115",
+		// AWS Bedrock base patterns (without regional prefix)
+		"claude-opus-4-6-20260115-v1:0",
+		// Bedrock shorthand (no date suffix)
+		"claude-opus-4-6-v1",
 	}
 
 	for _, supportedModel := range supportedModels {
@@ -357,6 +398,11 @@ type ToolResult struct {
 	ToolName string `json:"tool_name"`
 }
 
+// OutputConfig represents the output configuration for controlling thinking effort
+type OutputConfig struct {
+	Effort string `json:"effort,omitempty"` // "low", "medium", "high", "max"
+}
+
 // CompletionRequest represents a request for Anthropic API
 type CompletionRequest struct {
 	Model            string         `json:"model,omitempty"`
@@ -373,6 +419,7 @@ type CompletionRequest struct {
 	MetadataKey      string         `json:"metadata,omitempty"`
 	AnthropicVersion string         `json:"anthropic_version,omitempty"` // For Vertex AI
 	Thinking         *ReasoningSpec `json:"thinking,omitempty"`          // Keep "thinking" for API compatibility
+	OutputConfig     *OutputConfig  `json:"output_config,omitempty"`     // Effort control for adaptive thinking
 }
 
 // ReasoningSpec represents the reasoning configuration for Anthropic API
@@ -417,6 +464,128 @@ type Usage struct {
 	OutputTokens             int `json:"output_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+}
+
+// thinkingConfig holds the resolved thinking configuration for a request
+type thinkingConfig struct {
+	Thinking     *ReasoningSpec
+	OutputConfig *OutputConfig
+	Temperature  float64 // 0 means "don't override"
+	MaxTokens    int     // 0 means "use default"
+}
+
+// buildThinkingConfig resolves the thinking configuration based on LLMConfig and model
+func buildThinkingConfig(config *interfaces.LLMConfig, model string, logger logging.Logger, ctx context.Context) thinkingConfig {
+	result := thinkingConfig{}
+
+	if config == nil {
+		return result
+	}
+
+	// Handle effort (independent of thinking mode)
+	if config.Effort != "" {
+		result.OutputConfig = &OutputConfig{Effort: config.Effort}
+	}
+
+	// Priority 1: ThinkingMode == "adaptive"
+	if config.ThinkingMode == "adaptive" {
+		if SupportsAdaptiveThinking(model) {
+			result.Thinking = &ReasoningSpec{Type: "adaptive"}
+			result.Temperature = 1.0
+			if logger != nil {
+				logger.Debug(ctx, "Enabled adaptive thinking", map[string]interface{}{
+					"model":  model,
+					"effort": config.Effort,
+				})
+			}
+		} else if SupportsThinking(model) {
+			// Fallback: model supports thinking but not adaptive
+			result.Thinking = &ReasoningSpec{Type: "enabled"}
+			if config.ReasoningBudget > 0 {
+				result.Thinking.BudgetTokens = config.ReasoningBudget
+				result.MaxTokens = config.ReasoningBudget + 4000
+			}
+			result.Temperature = 1.0
+			if logger != nil {
+				logger.Warn(ctx, "Model does not support adaptive thinking, falling back to enabled", map[string]interface{}{
+					"model":         model,
+					"budget_tokens": config.ReasoningBudget,
+				})
+			}
+		} else {
+			if logger != nil {
+				logger.Warn(ctx, "Thinking tokens not supported by this model, ignoring adaptive thinking request", map[string]interface{}{
+					"model": model,
+				})
+			}
+		}
+		return result
+	}
+
+	// Priority 2: ThinkingMode == "enabled"
+	if config.ThinkingMode == "enabled" {
+		if SupportsThinking(model) {
+			result.Thinking = &ReasoningSpec{Type: "enabled"}
+			if config.ReasoningBudget > 0 {
+				result.Thinking.BudgetTokens = config.ReasoningBudget
+				result.MaxTokens = config.ReasoningBudget + 4000
+			}
+			result.Temperature = 1.0
+			if logger != nil {
+				logger.Debug(ctx, "Enabled thinking tokens via ThinkingMode", map[string]interface{}{
+					"model":         model,
+					"budget_tokens": config.ReasoningBudget,
+				})
+			}
+		} else {
+			if logger != nil {
+				logger.Warn(ctx, "Thinking tokens not supported by this model", map[string]interface{}{
+					"model": model,
+				})
+			}
+		}
+		return result
+	}
+
+	// Priority 3: Legacy EnableReasoning (backward compatibility)
+	if config.EnableReasoning {
+		if SupportsThinking(model) {
+			result.Thinking = &ReasoningSpec{Type: "enabled"}
+			if config.ReasoningBudget > 0 {
+				result.Thinking.BudgetTokens = config.ReasoningBudget
+				result.MaxTokens = config.ReasoningBudget + 4000
+			}
+			result.Temperature = 1.0
+		} else {
+			if logger != nil {
+				logger.Warn(ctx, "Thinking tokens not supported by this model", map[string]interface{}{
+					"model": model,
+				})
+			}
+		}
+	}
+
+	return result
+}
+
+// WithAdaptiveThinking creates an Anthropic-specific GenerateOption to enable adaptive thinking (Opus 4.6+)
+func WithAdaptiveThinking() interfaces.GenerateOption {
+	return func(options *interfaces.GenerateOptions) {
+		if options.LLMConfig == nil {
+			options.LLMConfig = &interfaces.LLMConfig{}
+		}
+		options.LLMConfig.ThinkingMode = "adaptive"
+	}
+}
+
+// WithEffort creates an Anthropic-specific GenerateOption to set the effort level
+func WithEffort(effort string) interfaces.GenerateOption {
+	return func(options *interfaces.GenerateOptions) {
+		if options.LLMConfig == nil {
+			options.LLMConfig = &interfaces.LLMConfig{}
+		}
+		options.LLMConfig.Effort = effort
+	}
 }
 
 // WithReasoning creates a GenerateOption to set the reasoning mode
@@ -544,48 +713,34 @@ Example output:
 Return only the JSON object, with no additional text or markdown formatting.`, prompt, string(schemaJSON), string(exampleStr))
 	}
 
-	// Calculate maxTokens - must be greater than budget_tokens when reasoning is enabled
+	// Resolve thinking configuration
+	thinking := buildThinkingConfig(params.LLMConfig, c.Model, c.logger, ctx)
+
+	// Calculate maxTokens
 	maxTokens := 2048 // default
-	if params.LLMConfig != nil && params.LLMConfig.EnableReasoning && params.LLMConfig.ReasoningBudget > 0 {
-		// Ensure max_tokens > budget_tokens for reasoning
-		maxTokens = params.LLMConfig.ReasoningBudget + 4000 // Add buffer for actual response
+	if thinking.MaxTokens > 0 {
+		maxTokens = thinking.MaxTokens
 	}
 
 	// Create request
 	req := CompletionRequest{
-		Model:       c.Model,
-		Messages:    messages,
-		MaxTokens:   maxTokens,
-		Temperature: params.LLMConfig.Temperature,
-		TopP:        params.LLMConfig.TopP,
+		Model:        c.Model,
+		Messages:     messages,
+		MaxTokens:    maxTokens,
+		Temperature:  params.LLMConfig.Temperature,
+		TopP:         params.LLMConfig.TopP,
+		Thinking:     thinking.Thinking,
+		OutputConfig: thinking.OutputConfig,
+	}
+
+	// Override temperature if thinking requires it
+	if thinking.Temperature > 0 {
+		req.Temperature = thinking.Temperature
 	}
 
 	// Handle stop sequences
 	if len(params.LLMConfig.StopSequences) > 0 {
 		req.StopSequences = params.LLMConfig.StopSequences
-	}
-
-	// Handle reasoning/thinking if supported
-	if params.LLMConfig != nil && params.LLMConfig.EnableReasoning && SupportsThinking(c.Model) {
-		req.Thinking = &ReasoningSpec{
-			Type: "enabled",
-		}
-		if params.LLMConfig.ReasoningBudget > 0 {
-			req.Thinking.BudgetTokens = params.LLMConfig.ReasoningBudget
-		}
-		// Anthropic requires temperature = 1.0 when thinking is enabled
-		req.Temperature = 1.0
-		c.logger.Debug(ctx, "Enabled reasoning (thinking) tokens", map[string]interface{}{
-			"model":         c.Model,
-			"budget_tokens": params.LLMConfig.ReasoningBudget,
-			"max_tokens":    req.MaxTokens,
-			"temperature":   req.Temperature, // Show override
-		})
-	} else if params.LLMConfig != nil && params.LLMConfig.EnableReasoning {
-		c.logger.Warn(ctx, "Thinking tokens not supported by this model", map[string]interface{}{
-			"model":            c.Model,
-			"supported_models": []string{"claude-3-7-sonnet-20250219", "claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-opus-4-1-20250805"},
-		})
 	}
 
 	// Add system message if provided
@@ -1073,11 +1228,13 @@ func (c *AnthropicClient) GenerateWithTools(ctx context.Context, prompt string, 
 	// Build messages with memory and current prompt
 	messages := c.buildMessagesWithMemory(ctx, prompt, params)
 
-	// Calculate maxTokens - must be greater than budget_tokens when reasoning is enabled
+	// Resolve thinking configuration
+	thinking := buildThinkingConfig(params.LLMConfig, c.Model, c.logger, ctx)
+
+	// Calculate maxTokens
 	maxTokens := 2048 // default
-	if params.LLMConfig != nil && params.LLMConfig.EnableReasoning && params.LLMConfig.ReasoningBudget > 0 {
-		// Ensure max_tokens > budget_tokens for reasoning
-		maxTokens = params.LLMConfig.ReasoningBudget + 4000 // Add buffer for actual response
+	if thinking.MaxTokens > 0 {
+		maxTokens = thinking.MaxTokens
 	}
 
 	// Iterative tool calling loop
@@ -1094,6 +1251,13 @@ func (c *AnthropicClient) GenerateWithTools(ctx context.Context, prompt string, 
 			ToolChoice: map[string]string{
 				"type": "auto",
 			},
+			Thinking:     thinking.Thinking,
+			OutputConfig: thinking.OutputConfig,
+		}
+
+		// Override temperature if thinking requires it
+		if thinking.Temperature > 0 {
+			req.Temperature = thinking.Temperature
 		}
 
 		// Add system message if available
@@ -1109,11 +1273,6 @@ func (c *AnthropicClient) GenerateWithTools(ctx context.Context, prompt string, 
 			// If no system message but structured output is requested, add a system message for JSON
 			req.System = "You must respond with valid JSON that matches the specified schema. Return ONLY the raw JSON object without any markdown formatting, code blocks, or wrapper text. Pay special attention to array fields - if a field is defined as an array in the schema, it MUST be an array in your response, not an object."
 			c.logger.Debug(ctx, "Added system message for structured output", nil)
-		}
-
-		// Add reasoning parameter if available
-		if params.LLMConfig != nil && params.LLMConfig.Reasoning != "" {
-			c.logger.Debug(ctx, "Reasoning mode not supported in current API version", map[string]interface{}{"reasoning": params.LLMConfig.Reasoning})
 		}
 
 		// Send request
@@ -1133,6 +1292,16 @@ func (c *AnthropicClient) GenerateWithTools(ctx context.Context, prompt string, 
 
 		// Define operation for retry mechanism
 		operation := func() error {
+			// Bedrock uses AWS SDK, not HTTP requests
+			if c.BedrockConfig != nil && c.BedrockConfig.Enabled {
+				bedrockResp, err := c.BedrockConfig.InvokeModel(ctx, c.Model, &req)
+				if err != nil {
+					return fmt.Errorf("failed to invoke Bedrock model (iteration %d): %w", iteration+1, err)
+				}
+				resp = *bedrockResp
+				return nil
+			}
+
 			// Create HTTP request (supports both Vertex AI and standard Anthropic API, with caching)
 			httpReq, err := c.createHTTPRequestWithCache(ctx, &req, "/v1/messages", params.CacheConfig)
 			if err != nil {
@@ -1366,12 +1535,19 @@ func (c *AnthropicClient) GenerateWithTools(ctx context.Context, prompt string, 
 
 	// Create a final request without tools to force the LLM to provide a conclusion
 	finalReq := CompletionRequest{
-		Model:       c.Model,
-		Messages:    messages,
-		MaxTokens:   maxTokens, // Use calculated maxTokens (already accounts for reasoning budget)
-		Temperature: params.LLMConfig.Temperature,
-		TopP:        params.LLMConfig.TopP,
-		Tools:       nil, // No tools for final call
+		Model:        c.Model,
+		Messages:     messages,
+		MaxTokens:    maxTokens, // Use calculated maxTokens (already accounts for reasoning budget)
+		Temperature:  params.LLMConfig.Temperature,
+		TopP:         params.LLMConfig.TopP,
+		Tools:        nil, // No tools for final call
+		Thinking:     thinking.Thinking,
+		OutputConfig: thinking.OutputConfig,
+	}
+
+	// Override temperature if thinking requires it
+	if thinking.Temperature > 0 {
+		finalReq.Temperature = thinking.Temperature
 	}
 
 	// Add system message if available and enhance for structured output
@@ -1438,73 +1614,83 @@ CRITICAL INSTRUCTIONS:
 		"messages": len(finalReq.Messages),
 	})
 
-	// Create final HTTP request (supports both Vertex AI and standard Anthropic API)
-	finalHTTPReq, err := c.createHTTPRequest(ctx, &finalReq, "/v1/messages")
-	if err != nil {
-		return "", fmt.Errorf("failed to create final request: %w", err)
-	}
-
-	// Send final request
-	finalHTTPResp, err := c.HTTPClient.Do(finalHTTPReq)
-	if err != nil {
-		c.logger.Error(ctx, "Error in final call without tools", map[string]interface{}{"error": err.Error()})
-		return "", fmt.Errorf("failed to send final request: %w", err)
-	}
-	defer func() {
-		if closeErr := finalHTTPResp.Body.Close(); closeErr != nil {
-			c.logger.Warn(ctx, "Failed to close final response body", map[string]interface{}{
-				"error": closeErr.Error(),
-			})
-		}
-	}()
-
-	// Read final response body
-	finalRespBody, err := io.ReadAll(finalHTTPResp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read final response body: %w", err)
-	}
-
-	// Check for error response
-	if finalHTTPResp.StatusCode != http.StatusOK {
-		c.logger.Error(ctx, "Error from Anthropic API in final call", map[string]interface{}{
-			"status_code": finalHTTPResp.StatusCode,
-			"response":    string(finalRespBody),
-		})
-		return "", fmt.Errorf("error from Anthropic API in final call: %s", string(finalRespBody))
-	}
-
-	// Log raw final response before unmarshaling for debugging
-	c.logger.Debug(ctx, "Raw final response before unmarshaling", map[string]interface{}{
-		"response_length": len(finalRespBody),
-		"response_prefix": func() string {
-			if len(finalRespBody) > 100 {
-				return string(finalRespBody[:100])
-			}
-			return string(finalRespBody)
-		}(),
-		"first_char": func() string {
-			if len(finalRespBody) > 0 {
-				return fmt.Sprintf("'%c' (0x%02x)", finalRespBody[0], finalRespBody[0])
-			}
-			return "empty"
-		}(),
-	})
-
-	// Unmarshal final response
 	var finalResp CompletionResponse
-	err = json.Unmarshal(finalRespBody, &finalResp)
-	if err != nil {
-		c.logger.Error(ctx, "Failed to unmarshal final response", map[string]interface{}{
-			"error":           err.Error(),
+
+	// Bedrock uses AWS SDK, not HTTP requests
+	if c.BedrockConfig != nil && c.BedrockConfig.Enabled {
+		bedrockResp, err := c.BedrockConfig.InvokeModel(ctx, c.Model, &finalReq)
+		if err != nil {
+			return "", fmt.Errorf("failed to invoke Bedrock model for final request: %w", err)
+		}
+		finalResp = *bedrockResp
+	} else {
+		// Create final HTTP request (supports both Vertex AI and standard Anthropic API)
+		finalHTTPReq, err := c.createHTTPRequest(ctx, &finalReq, "/v1/messages")
+		if err != nil {
+			return "", fmt.Errorf("failed to create final request: %w", err)
+		}
+
+		// Send final request
+		finalHTTPResp, err := c.HTTPClient.Do(finalHTTPReq)
+		if err != nil {
+			c.logger.Error(ctx, "Error in final call without tools", map[string]interface{}{"error": err.Error()})
+			return "", fmt.Errorf("failed to send final request: %w", err)
+		}
+		defer func() {
+			if closeErr := finalHTTPResp.Body.Close(); closeErr != nil {
+				c.logger.Warn(ctx, "Failed to close final response body", map[string]interface{}{
+					"error": closeErr.Error(),
+				})
+			}
+		}()
+
+		// Read final response body
+		finalRespBody, err := io.ReadAll(finalHTTPResp.Body)
+		if err != nil {
+			return "", fmt.Errorf("failed to read final response body: %w", err)
+		}
+
+		// Check for error response
+		if finalHTTPResp.StatusCode != http.StatusOK {
+			c.logger.Error(ctx, "Error from Anthropic API in final call", map[string]interface{}{
+				"status_code": finalHTTPResp.StatusCode,
+				"response":    string(finalRespBody),
+			})
+			return "", fmt.Errorf("error from Anthropic API in final call: %s", string(finalRespBody))
+		}
+
+		// Log raw final response before unmarshaling for debugging
+		c.logger.Debug(ctx, "Raw final response before unmarshaling", map[string]interface{}{
 			"response_length": len(finalRespBody),
-			"response_sample": func() string {
-				if len(finalRespBody) > 200 {
-					return string(finalRespBody[:200])
+			"response_prefix": func() string {
+				if len(finalRespBody) > 100 {
+					return string(finalRespBody[:100])
 				}
 				return string(finalRespBody)
 			}(),
+			"first_char": func() string {
+				if len(finalRespBody) > 0 {
+					return fmt.Sprintf("'%c' (0x%02x)", finalRespBody[0], finalRespBody[0])
+				}
+				return "empty"
+			}(),
 		})
-		return "", fmt.Errorf("failed to unmarshal final response: %w", err)
+
+		// Unmarshal final response
+		err = json.Unmarshal(finalRespBody, &finalResp)
+		if err != nil {
+			c.logger.Error(ctx, "Failed to unmarshal final response", map[string]interface{}{
+				"error":           err.Error(),
+				"response_length": len(finalRespBody),
+				"response_sample": func() string {
+					if len(finalRespBody) > 200 {
+						return string(finalRespBody[:200])
+					}
+					return string(finalRespBody)
+				}(),
+			})
+			return "", fmt.Errorf("failed to unmarshal final response: %w", err)
+		}
 	}
 
 	// Extract text content from final response

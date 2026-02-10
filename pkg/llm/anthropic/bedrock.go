@@ -60,7 +60,8 @@ type BedrockRequest struct {
 	TopK             int            `json:"top_k,omitempty"`
 	StopSequences    []string       `json:"stop_sequences,omitempty"`
 	AnthropicVersion string         `json:"anthropic_version"`
-	Thinking         *ReasoningSpec `json:"thinking,omitempty"` // Extended thinking support for Claude models
+	Thinking         *ReasoningSpec `json:"thinking,omitempty"`      // Extended thinking support for Claude models
+	OutputConfig     *OutputConfig  `json:"output_config,omitempty"` // Effort control for adaptive thinking
 }
 
 // TransformRequest converts an Anthropic CompletionRequest to Bedrock format
@@ -81,6 +82,7 @@ func (bc *BedrockConfig) TransformRequest(req *CompletionRequest) (*BedrockReque
 		StopSequences:    req.StopSequences,
 		AnthropicVersion: "bedrock-2023-05-31", // Required for Bedrock
 		Thinking:         req.Thinking,         // Extended thinking support
+		OutputConfig:     req.OutputConfig,      // Effort control for adaptive thinking
 	}
 
 	return bedrockReq, nil

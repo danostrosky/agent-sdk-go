@@ -130,6 +130,7 @@ type CacheableCompletionRequest struct {
 	Stream           bool            `json:"stream,omitempty"`
 	AnthropicVersion string          `json:"anthropic_version,omitempty"`
 	Thinking         *ReasoningSpec  `json:"thinking,omitempty"`
+	OutputConfig     *OutputConfig   `json:"output_config,omitempty"`
 }
 
 // BuildCacheableRequest creates a CacheableCompletionRequest from a standard
@@ -146,6 +147,7 @@ func (b *cacheRequestBuilder) BuildCacheableRequest(req *CompletionRequest) (*Ca
 		Stream:           req.Stream,
 		AnthropicVersion: req.AnthropicVersion,
 		Thinking:         req.Thinking,
+		OutputConfig:     req.OutputConfig,
 	}
 
 	// Build system content

@@ -57,21 +57,29 @@ func (c *AnthropicClient) GenerateStream(
 	builder := newMessageHistoryBuilder(c.logger)
 	messages := builder.buildMessages(ctx, prompt, params)
 
-	// Create request with streaming enabled
-	// Note: MaxTokens must be greater than reasoning budget_tokens
+	// Resolve thinking configuration
+	thinking := buildThinkingConfig(params.LLMConfig, c.Model, c.logger, ctx)
+
+	// Calculate maxTokens
 	maxTokens := 2048 // default
-	if params.LLMConfig != nil && params.LLMConfig.EnableReasoning && params.LLMConfig.ReasoningBudget > 0 {
-		// Ensure max_tokens > budget_tokens for reasoning
-		maxTokens = params.LLMConfig.ReasoningBudget + 4000 // Add buffer for actual response
+	if thinking.MaxTokens > 0 {
+		maxTokens = thinking.MaxTokens
 	}
 
 	req := CompletionRequest{
-		Model:       c.Model,
-		Messages:    messages,
-		MaxTokens:   maxTokens,
-		Temperature: params.LLMConfig.Temperature,
-		TopP:        params.LLMConfig.TopP,
-		Stream:      true, // Enable streaming
+		Model:        c.Model,
+		Messages:     messages,
+		MaxTokens:    maxTokens,
+		Temperature:  params.LLMConfig.Temperature,
+		TopP:         params.LLMConfig.TopP,
+		Stream:       true, // Enable streaming
+		Thinking:     thinking.Thinking,
+		OutputConfig: thinking.OutputConfig,
+	}
+
+	// Override temperature if thinking requires it
+	if thinking.Temperature > 0 {
+		req.Temperature = thinking.Temperature
 	}
 
 	// Add system message if available
@@ -83,31 +91,6 @@ func (c *AnthropicClient) GenerateStream(
 	// Add stop sequences if provided
 	if params.LLMConfig != nil && len(params.LLMConfig.StopSequences) > 0 {
 		req.StopSequences = params.LLMConfig.StopSequences
-	}
-
-	// Add reasoning (thinking) support if enabled and model supports it
-	if params.LLMConfig != nil && params.LLMConfig.EnableReasoning {
-		if SupportsThinking(c.Model) {
-			req.Thinking = &ReasoningSpec{
-				Type: "enabled",
-			}
-			if params.LLMConfig.ReasoningBudget > 0 {
-				req.Thinking.BudgetTokens = params.LLMConfig.ReasoningBudget
-			}
-			// Anthropic requires temperature = 1.0 when thinking is enabled
-			req.Temperature = 1.0
-			c.logger.Debug(ctx, "Enabled reasoning (thinking) tokens", map[string]interface{}{
-				"model":         c.Model,
-				"budget_tokens": params.LLMConfig.ReasoningBudget,
-				"max_tokens":    maxTokens,
-				"temperature":   req.Temperature, // Show override
-			})
-		} else {
-			c.logger.Warn(ctx, "Thinking tokens not supported by this model", map[string]interface{}{
-				"model":            c.Model,
-				"supported_models": []string{"claude-3-7-sonnet-20250219", "claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-opus-4-1-20250805"},
-			})
-		}
 	}
 
 	// Get buffer size from stream config
@@ -436,11 +419,13 @@ func (c *AnthropicClient) executeStreamingWithTools(
 		maxIterations = params.MaxIterations
 	}
 
+	// Resolve thinking configuration
+	thinking := buildThinkingConfig(params.LLMConfig, c.Model, c.logger, ctx)
+
 	// Create base request configuration
 	maxTokens := 2048 // default
-	if params.LLMConfig != nil && params.LLMConfig.EnableReasoning && params.LLMConfig.ReasoningBudget > 0 {
-		// Ensure max_tokens > budget_tokens for reasoning
-		maxTokens = params.LLMConfig.ReasoningBudget + 4000 // Add buffer for actual response
+	if thinking.MaxTokens > 0 {
+		maxTokens = thinking.MaxTokens
 	}
 
 	gotCompleteResponse := false
@@ -461,34 +446,19 @@ func (c *AnthropicClient) executeStreamingWithTools(
 			ToolChoice: map[string]string{
 				"type": "auto",
 			},
-			Stream: true, // Enable streaming
+			Stream:       true, // Enable streaming
+			Thinking:     thinking.Thinking,
+			OutputConfig: thinking.OutputConfig,
+		}
+
+		// Override temperature if thinking requires it
+		if thinking.Temperature > 0 {
+			req.Temperature = thinking.Temperature
 		}
 
 		// Add system message if available
 		if params.SystemMessage != "" {
 			req.System = params.SystemMessage
-		}
-
-		// Add reasoning (thinking) support if enabled and model supports it
-		if params.LLMConfig != nil && params.LLMConfig.EnableReasoning {
-			if SupportsThinking(c.Model) {
-				req.Thinking = &ReasoningSpec{
-					Type: "enabled",
-				}
-				if params.LLMConfig.ReasoningBudget > 0 {
-					req.Thinking.BudgetTokens = params.LLMConfig.ReasoningBudget
-				}
-				// Anthropic requires temperature = 1.0 when thinking is enabled
-				req.Temperature = 1.0
-				c.logger.Debug(ctx, "Enabled reasoning (thinking) tokens for tools", map[string]interface{}{
-					"model":         c.Model,
-					"budget_tokens": params.LLMConfig.ReasoningBudget,
-					"max_tokens":    maxTokens,
-					"temperature":   req.Temperature,
-					"iteration":     iteration + 1,
-					"maxIterations": maxIterations,
-				})
-			}
 		}
 
 		// Execute streaming request and collect tool calls
@@ -774,13 +744,19 @@ CRITICAL INSTRUCTIONS:
 	})
 
 	finalReq := CompletionRequest{
-		Model:       c.Model,
-		Messages:    finalMessages,
-		MaxTokens:   maxTokens,
-		Temperature: params.LLMConfig.Temperature,
-		TopP:        params.LLMConfig.TopP,
-		// No tools in final request - we want a final answer
-		Stream: true, // Enable streaming
+		Model:        c.Model,
+		Messages:     finalMessages,
+		MaxTokens:    maxTokens,
+		Temperature:  params.LLMConfig.Temperature,
+		TopP:         params.LLMConfig.TopP,
+		Stream:       true, // Enable streaming
+		Thinking:     thinking.Thinking,
+		OutputConfig: thinking.OutputConfig,
+	}
+
+	// Override temperature if thinking requires it
+	if thinking.Temperature > 0 {
+		finalReq.Temperature = thinking.Temperature
 	}
 
 	// Add system message if available and enhance for structured output
@@ -793,26 +769,6 @@ CRITICAL INSTRUCTIONS:
 	} else if params.ResponseFormat != nil {
 		// If no system message but structured output is requested, add a system message for JSON
 		finalReq.System = "You must respond with valid JSON that matches the specified schema. Return ONLY the raw JSON object without any markdown formatting, code blocks, or wrapper text. Pay special attention to array fields - if a field is defined as an array in the schema, it MUST be an array in your response, not an object."
-	}
-
-	// Add reasoning (thinking) support if enabled and model supports it
-	if params.LLMConfig != nil && params.LLMConfig.EnableReasoning {
-		if SupportsThinking(c.Model) {
-			finalReq.Thinking = &ReasoningSpec{
-				Type: "enabled",
-			}
-			if params.LLMConfig.ReasoningBudget > 0 {
-				finalReq.Thinking.BudgetTokens = params.LLMConfig.ReasoningBudget
-			}
-			// Anthropic requires temperature = 1.0 when thinking is enabled
-			finalReq.Temperature = 1.0
-			c.logger.Debug(ctx, "Getting final answer with reasoning after tools", map[string]interface{}{
-				"model":         c.Model,
-				"budget_tokens": params.LLMConfig.ReasoningBudget,
-				"max_tokens":    maxTokens,
-				"temperature":   finalReq.Temperature,
-			})
-		}
 	}
 
 	// Execute final request to get synthesized answer with memory support
