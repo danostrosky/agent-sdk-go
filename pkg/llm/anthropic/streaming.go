@@ -876,11 +876,11 @@ func (c *AnthropicClient) createFilteredEventForwarder(
 	var capturedThinking []capturedThinkingBlock
 
 	for event := range tempEventChan {
-		// Track thinking blocks as meaningful content so the tool-calling loop
-		// knows the model responded (prevents unnecessary extra iterations)
-		if event.Type == interfaces.StreamEventThinking && event.Content != "" {
-			hasContent = true
-		}
+		// NOTE: Thinking events intentionally do NOT set hasContent.
+		// hasContent tracks whether the model produced actual text output.
+		// Thinking-only responses (no text, no tools) should fall through
+		// to the next iteration or final synthesis, not be treated as a
+		// final answer with empty content.
 
 		// Capture complete thinking blocks (emitted on content_block_stop for thinking)
 		// These contain the accumulated text + signature needed for conversation history
