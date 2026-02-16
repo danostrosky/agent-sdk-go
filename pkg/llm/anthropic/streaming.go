@@ -498,7 +498,7 @@ func (c *AnthropicClient) executeStreamingWithTools(
 		if params.StreamConfig != nil && params.StreamConfig.IncludeIntermediateMessages {
 			filterContentDeltas = false
 		}
-		toolCalls, hasContent, capturedContentEvents, err := c.executeStreamingRequestWithToolCapture(ctx, req, eventChan, filterContentDeltas, params)
+		toolCalls, hasContent, capturedContentEvents, thinkingBlocks, err := c.executeStreamingRequestWithToolCapture(ctx, req, eventChan, filterContentDeltas, params)
 		if err != nil {
 			c.logger.Error(ctx, "[LLM RESPONSE DEBUG] LLM call failed", map[string]interface{}{
 				"iteration": iteration + 1,
@@ -582,7 +582,13 @@ func (c *AnthropicClient) executeStreamingWithTools(
 		})
 
 		// Build assistant content blocks from captured events + tool_use blocks
+		// Include thinking blocks so the model can see its previous reasoning
 		var assistantBlocks []ContentBlock
+		for _, tb := range thinkingBlocks {
+			assistantBlocks = append(assistantBlocks, ContentBlock{
+				Type: "thinking", Thinking: tb.Text, Signature: tb.Signature,
+			})
+		}
 		var textBuilder strings.Builder
 		for _, event := range capturedContentEvents {
 			if event.Type == interfaces.StreamEventContentDelta {
@@ -844,22 +850,44 @@ CRITICAL INSTRUCTIONS:
 	return err
 }
 
+// capturedThinkingBlock holds a complete thinking block's text and signature
+// for inclusion in conversation history.
+type capturedThinkingBlock struct {
+	Text      string
+	Signature string
+}
+
 // createFilteredEventForwarder processes events and optionally captures content for later replay
 func (c *AnthropicClient) createFilteredEventForwarder(
 	ctx context.Context,
 	tempEventChan <-chan interfaces.StreamEvent,
 	eventChan chan<- interfaces.StreamEvent,
 	filterContentDeltas bool,
-) ([]interfaces.ToolCall, bool, []interfaces.StreamEvent, error) {
+) ([]interfaces.ToolCall, bool, []interfaces.StreamEvent, []capturedThinkingBlock, error) {
 	var toolCalls []interfaces.ToolCall
 	var hasContent bool
 	var capturedContentEvents []interfaces.StreamEvent
+	var capturedThinking []capturedThinkingBlock
 
 	for event := range tempEventChan {
 		// Track thinking blocks as meaningful content so the tool-calling loop
 		// knows the model responded (prevents unnecessary extra iterations)
 		if event.Type == interfaces.StreamEventThinking && event.Content != "" {
 			hasContent = true
+		}
+
+		// Capture complete thinking blocks (emitted on content_block_stop for thinking)
+		// These contain the accumulated text + signature needed for conversation history
+		if event.Type == interfaces.StreamEventContentComplete {
+			if blockType, _ := event.Metadata["block_type"].(string); blockType == "thinking" {
+				text, _ := event.Metadata["thinking_text"].(string)
+				sig, _ := event.Metadata["thinking_signature"].(string)
+				if text != "" {
+					capturedThinking = append(capturedThinking, capturedThinkingBlock{
+						Text: text, Signature: sig,
+					})
+				}
+			}
 		}
 
 		// Always capture content events for conversation history (not just when filtering)
@@ -877,7 +905,7 @@ func (c *AnthropicClient) createFilteredEventForwarder(
 		select {
 		case eventChan <- event:
 		case <-ctx.Done():
-			return nil, false, nil, ctx.Err()
+			return nil, false, nil, nil, ctx.Err()
 		}
 
 		// Capture tool calls
@@ -887,11 +915,11 @@ func (c *AnthropicClient) createFilteredEventForwarder(
 
 		// Check for errors
 		if event.Error != nil {
-			return nil, false, nil, event.Error
+			return nil, false, nil, nil, event.Error
 		}
 	}
 
-	return toolCalls, hasContent, capturedContentEvents, nil
+	return toolCalls, hasContent, capturedContentEvents, capturedThinking, nil
 }
 
 // executeStreamingRequestWithToolCapture executes a streaming request and captures tool calls
@@ -901,7 +929,7 @@ func (c *AnthropicClient) executeStreamingRequestWithToolCapture(
 	eventChan chan<- interfaces.StreamEvent,
 	filterContentDeltas bool,
 	params *interfaces.GenerateOptions,
-) ([]interfaces.ToolCall, bool, []interfaces.StreamEvent, error) {
+) ([]interfaces.ToolCall, bool, []interfaces.StreamEvent, []capturedThinkingBlock, error) {
 
 	// Create temporary channel to capture events
 	tempEventChan := make(chan interfaces.StreamEvent, 100)
@@ -965,7 +993,7 @@ func (c *AnthropicClient) executeBedrockStreaming(
 	}()
 
 	// Track thinking blocks and tool blocks for proper event handling (reusing SSE logic)
-	thinkingBlocks := make(map[int]bool)
+	thinkingBlocks := make(map[int]*thinkingBlockTracker)
 	toolBlocks := make(map[int]struct {
 		ID        string
 		Name      string

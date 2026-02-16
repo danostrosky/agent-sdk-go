@@ -165,7 +165,7 @@ func TestConvertAnthropicEventToStreamEvent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			thinkingBlocks := make(map[int]bool)
+			thinkingBlocks := make(map[int]*thinkingBlockTracker)
 			toolBlocks := make(map[int]struct {
 				ID        string
 				Name      string

@@ -461,6 +461,9 @@ type ContentBlock struct {
 	// tool_result fields (request-side only)
 	ToolUseID         string `json:"tool_use_id,omitempty"`
 	ToolResultContent string `json:"content,omitempty"`
+	// thinking fields (for echoing thinking blocks back in multi-turn)
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
 }
 
 // MarshalJSON implements custom JSON marshaling for ContentBlock.
@@ -490,6 +493,12 @@ func (cb ContentBlock) MarshalJSON() ([]byte, error) {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		}{Type: cb.Type, Text: cb.Text})
+	case "thinking":
+		return json.Marshal(struct {
+			Type      string `json:"type"`
+			Thinking  string `json:"thinking"`
+			Signature string `json:"signature"`
+		}{Type: cb.Type, Thinking: cb.Thinking, Signature: cb.Signature})
 	default:
 		// Fallback: use an alias to avoid recursion, marshal all tagged fields
 		type contentBlockAlias ContentBlock
@@ -1437,11 +1446,18 @@ func (c *AnthropicClient) GenerateWithTools(ctx context.Context, prompt string, 
 			"iteration": iteration + 1,
 		})
 
-		// Build assistant content blocks from full response (text + tool_use)
-		// This preserves the tool_use blocks so the model can match tool results
+		// Build assistant content blocks from full response (thinking + text + tool_use)
+		// This preserves thinking and tool_use blocks so the model can see its previous
+		// reasoning and match tool results to tool calls.
 		var assistantBlocks []ContentBlock
 		for _, block := range resp.Content {
 			switch block.Type {
+			case "thinking":
+				if block.Thinking != "" {
+					assistantBlocks = append(assistantBlocks, ContentBlock{
+						Type: "thinking", Thinking: block.Thinking, Signature: block.Signature,
+					})
+				}
 			case "text":
 				if strings.TrimSpace(block.Text) != "" {
 					assistantBlocks = append(assistantBlocks, ContentBlock{Type: "text", Text: block.Text})

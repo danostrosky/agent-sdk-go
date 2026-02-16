@@ -50,8 +50,15 @@ type ContentBlockDeltaData struct {
 		Type        string `json:"type"`
 		Text        string `json:"text,omitempty"`
 		Thinking    string `json:"thinking,omitempty"`     // Thinking content field
+		Signature   string `json:"signature,omitempty"`    // Thinking signature field (signature_delta)
 		PartialJSON string `json:"partial_json,omitempty"` // For input_json_delta events
 	} `json:"delta"`
+}
+
+// thinkingBlockTracker accumulates thinking text and signature across streaming deltas.
+type thinkingBlockTracker struct {
+	text      strings.Builder
+	signature strings.Builder
 }
 
 // ContentBlockStop event data
@@ -113,7 +120,7 @@ func parseSSELine(line string) (*AnthropicSSEEvent, error) {
 }
 
 // convertAnthropicEventToStreamEvent converts an Anthropic SSE event to our internal StreamEvent
-func (c *AnthropicClient) convertAnthropicEventToStreamEvent(event *AnthropicSSEEvent, thinkingBlocks map[int]bool, toolBlocks map[int]struct {
+func (c *AnthropicClient) convertAnthropicEventToStreamEvent(event *AnthropicSSEEvent, thinkingBlocks map[int]*thinkingBlockTracker, toolBlocks map[int]struct {
 	ID        string
 	Name      string
 	InputJSON strings.Builder
@@ -150,12 +157,11 @@ func (c *AnthropicClient) convertAnthropicEventToStreamEvent(event *AnthropicSSE
 		switch blockStart.ContentBlock.Type {
 		case "thinking":
 			streamEvent.Type = interfaces.StreamEventThinking
-			thinkingBlocks[blockStart.Index] = true
+			thinkingBlocks[blockStart.Index] = &thinkingBlockTracker{}
 			streamEvent.Content = blockStart.ContentBlock.Text
 
 		case "tool_use":
 			// Don't send tool call event immediately - track tool info and wait for complete input
-			thinkingBlocks[blockStart.Index] = false // Not a thinking block
 
 			// Store tool info to accumulate input arguments later
 			info := struct {
@@ -180,7 +186,6 @@ func (c *AnthropicClient) convertAnthropicEventToStreamEvent(event *AnthropicSSE
 
 		default: // "text" or other types
 			streamEvent.Type = interfaces.StreamEventContentDelta
-			thinkingBlocks[blockStart.Index] = false
 			streamEvent.Content = blockStart.ContentBlock.Text
 		}
 
@@ -205,11 +210,22 @@ func (c *AnthropicClient) convertAnthropicEventToStreamEvent(event *AnthropicSSE
 			return nil, nil
 		}
 
+		// Check if this is a signature_delta (thinking block signature)
+		if blockDelta.Delta.Type == "signature_delta" {
+			if tracker, exists := thinkingBlocks[blockDelta.Index]; exists {
+				tracker.signature.WriteString(blockDelta.Delta.Signature)
+			}
+			// Don't forward signature deltas to the event channel
+			return nil, nil
+		}
+
 		// Check if this block is a thinking block using our tracking
-		if thinkingBlocks[blockDelta.Index] {
+		if tracker, exists := thinkingBlocks[blockDelta.Index]; exists {
 			streamEvent.Type = interfaces.StreamEventThinking
 			// For thinking blocks, use the thinking field instead of text field
 			streamEvent.Content = blockDelta.Delta.Thinking
+			// Accumulate thinking text for conversation history
+			tracker.text.WriteString(blockDelta.Delta.Thinking)
 		} else {
 			streamEvent.Type = interfaces.StreamEventContentDelta
 			streamEvent.Content = blockDelta.Delta.Text
@@ -236,6 +252,14 @@ func (c *AnthropicClient) convertAnthropicEventToStreamEvent(event *AnthropicSSE
 
 			// Remove from tracking map
 			delete(toolBlocks, blockStop.Index)
+		} else if tracker, exists := thinkingBlocks[blockStop.Index]; exists {
+			// Thinking block complete — emit with accumulated text + signature
+			streamEvent.Type = interfaces.StreamEventContentComplete
+			streamEvent.Metadata["block_index"] = blockStop.Index
+			streamEvent.Metadata["block_type"] = "thinking"
+			streamEvent.Metadata["thinking_text"] = tracker.text.String()
+			streamEvent.Metadata["thinking_signature"] = tracker.signature.String()
+			delete(thinkingBlocks, blockStop.Index)
 		} else {
 			// Regular content block stop
 			streamEvent.Type = interfaces.StreamEventContentComplete
@@ -311,8 +335,8 @@ func (c *AnthropicClient) parseSSEStreamAndCapture(ctx context.Context, scanner 
 	var accumulatedContent strings.Builder
 
 	var currentEvent *AnthropicSSEEvent
-	// Track which block indices are thinking blocks
-	thinkingBlocks := make(map[int]bool)
+	// Track thinking blocks with accumulated text + signature
+	thinkingBlocks := make(map[int]*thinkingBlockTracker)
 	// Track tool blocks and accumulate their input arguments
 	toolBlocks := make(map[int]struct {
 		ID        string
@@ -423,7 +447,7 @@ func (c *AnthropicClient) parseSSEStreamAndCapture(ctx context.Context, scanner 
 	return accumulatedContent.String()
 }
 
-func (c *AnthropicClient) processCompleteSSEEventAndCapture(ctx context.Context, event *AnthropicSSEEvent, eventChan chan<- interfaces.StreamEvent, thinkingBlocks map[int]bool, toolBlocks map[int]struct {
+func (c *AnthropicClient) processCompleteSSEEventAndCapture(ctx context.Context, event *AnthropicSSEEvent, eventChan chan<- interfaces.StreamEvent, thinkingBlocks map[int]*thinkingBlockTracker, toolBlocks map[int]struct {
 	ID        string
 	Name      string
 	InputJSON strings.Builder
