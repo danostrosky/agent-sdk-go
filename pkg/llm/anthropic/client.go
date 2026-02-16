@@ -272,6 +272,7 @@ const (
 	ClaudeOpus4    = "claude-opus-4-20250514"     // Latest Opus with thinking
 	ClaudeOpus41   = "claude-opus-4-1-20250805"   // Latest Opus 4.1
 	ClaudeOpus45   = "claude-opus-4-5-20251101"   // Latest Opus 4.5
+	ClaudeOpus46   = "claude-opus-4-6-20260205"   // Latest Opus 4.6
 
 	// AWS Bedrock model IDs
 	BedrockClaude35Haiku  = "anthropic.claude-3-5-haiku-20241022-v1:0"
@@ -283,6 +284,7 @@ const (
 	BedrockClaudeOpus4    = "anthropic.claude-opus-4-20250514-v1:0"
 	BedrockClaudeOpus41   = "anthropic.claude-opus-4-1-20250805-v1:0"
 	BedrockClaudeOpus45   = "anthropic.claude-opus-4-5-20251101-v1:0"
+	BedrockClaudeOpus46   = "anthropic.claude-opus-4-6-20260205-v1:0"
 )
 
 // SupportsThinking returns true if the model supports thinking tokens
@@ -310,6 +312,7 @@ func SupportsThinking(model string) bool {
 		"claude-opus-4-20250514",
 		"claude-opus-4-1-20250805",
 		"claude-opus-4-5-20251101",
+		"claude-opus-4-6-20260205",
 		// Vertex AI format models
 		"claude-sonnet-4@20250514",
 		"claude-sonnet-4-v1@20250514",
@@ -318,6 +321,7 @@ func SupportsThinking(model string) bool {
 		"claude-opus-4-v1@20250514",
 		"claude-opus-4-1@20250805",
 		"claude-opus-4-5@20251101",
+		"claude-opus-4-6@20260205",
 		// AWS Bedrock base patterns (without regional prefix)
 		"claude-3-7-sonnet-20250219-v1:0",
 		"claude-sonnet-4-20250514-v1:0",
@@ -325,6 +329,7 @@ func SupportsThinking(model string) bool {
 		"claude-opus-4-20250514-v1:0",
 		"claude-opus-4-1-20250805-v1:0",
 		"claude-opus-4-5-20251101-v1:0",
+		"claude-opus-4-6-20260205-v1:0",
 	}
 
 	for _, supportedModel := range supportedModels {
@@ -332,6 +337,19 @@ func SupportsThinking(model string) bool {
 			return true
 		}
 	}
+
+	// Also check prefix patterns for short-form Bedrock IDs (e.g., "claude-opus-4-6-v1")
+	supportedPrefixes := []string{
+		"claude-3-7-sonnet",
+		"claude-sonnet-4",
+		"claude-opus-4",
+	}
+	for _, prefix := range supportedPrefixes {
+		if strings.HasPrefix(normalizedModel, prefix) {
+			return true
+		}
+	}
+
 	return false
 }
 
@@ -1453,7 +1471,8 @@ func (c *AnthropicClient) GenerateWithTools(ctx context.Context, prompt string, 
 		for _, block := range resp.Content {
 			switch block.Type {
 			case "thinking":
-				if block.Thinking != "" {
+				// Both thinking text and signature must be non-empty (Anthropic API requirement)
+				if block.Thinking != "" && block.Signature != "" {
 					assistantBlocks = append(assistantBlocks, ContentBlock{
 						Type: "thinking", Thinking: block.Thinking, Signature: block.Signature,
 					})
