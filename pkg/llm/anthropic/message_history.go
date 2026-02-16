@@ -78,6 +78,9 @@ func (b *messageHistoryBuilder) convertMemoryMessage(msg interfaces.Message) *Me
 					})
 					continue
 				}
+				if args == nil {
+					args = map[string]interface{}{}
+				}
 				blocks = append(blocks, ContentBlock{
 					Type:  "tool_use",
 					ID:    toolCall.ID,

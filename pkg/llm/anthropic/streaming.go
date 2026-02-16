@@ -597,6 +597,9 @@ func (c *AnthropicClient) executeStreamingWithTools(
 			if tc.Arguments != "" {
 				_ = json.Unmarshal([]byte(tc.Arguments), &input)
 			}
+			if input == nil {
+				input = map[string]interface{}{}
+			}
 			assistantBlocks = append(assistantBlocks, ContentBlock{Type: "tool_use", ID: tc.ID, Name: tc.Name, Input: input})
 		}
 		if len(assistantBlocks) > 0 {

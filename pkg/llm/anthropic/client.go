@@ -1423,6 +1423,9 @@ func (c *AnthropicClient) GenerateWithTools(ctx context.Context, prompt string, 
 					cb.Name = block.Name
 					cb.Input = block.Input
 				}
+				if cb.Input == nil {
+					cb.Input = map[string]interface{}{}
+				}
 				assistantBlocks = append(assistantBlocks, cb)
 			}
 		}
