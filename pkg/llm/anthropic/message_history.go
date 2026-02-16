@@ -64,17 +64,12 @@ func (b *messageHistoryBuilder) convertMemoryMessage(msg interfaces.Message) *Me
 
 	case interfaces.MessageRoleAssistant:
 		if len(msg.ToolCalls) > 0 {
-			// Assistant message with tool calls
-			var contentParts []string
-
-			// Add text content if present
+			// Assistant message with tool calls — use ContentBlocks for proper API format
+			var blocks []ContentBlock
 			if msg.Content != "" {
-				contentParts = append(contentParts, msg.Content)
+				blocks = append(blocks, ContentBlock{Type: "text", Text: msg.Content})
 			}
-
-			// Add tool use information
 			for _, toolCall := range msg.ToolCalls {
-				// Parse arguments from JSON string
 				var args map[string]interface{}
 				if err := json.Unmarshal([]byte(toolCall.Arguments), &args); err != nil {
 					b.logger.Warn(context.Background(), "Failed to parse tool call arguments", map[string]interface{}{
@@ -83,34 +78,14 @@ func (b *messageHistoryBuilder) convertMemoryMessage(msg interfaces.Message) *Me
 					})
 					continue
 				}
-
-				// Create tool use content
-				toolUseContent := map[string]interface{}{
-					"type":  "tool_use",
-					"id":    toolCall.ID,
-					"name":  toolCall.Name,
-					"input": args,
-				}
-
-				// Convert to JSON string for content
-				if toolUseJSON, err := json.Marshal(toolUseContent); err == nil {
-					contentParts = append(contentParts, string(toolUseJSON))
-				}
+				blocks = append(blocks, ContentBlock{
+					Type:  "tool_use",
+					ID:    toolCall.ID,
+					Name:  toolCall.Name,
+					Input: args,
+				})
 			}
-
-			// Join all content parts
-			content := ""
-			if len(contentParts) > 0 {
-				content = contentParts[0]
-				for i := 1; i < len(contentParts); i++ {
-					content += "\n" + contentParts[i]
-				}
-			}
-
-			return &Message{
-				Role:    "assistant",
-				Content: content,
-			}
+			return &Message{Role: "assistant", ContentBlocks: blocks}
 		} else if msg.Content != "" {
 			// Regular assistant message
 			return &Message{
@@ -120,11 +95,15 @@ func (b *messageHistoryBuilder) convertMemoryMessage(msg interfaces.Message) *Me
 		}
 
 	case interfaces.MessageRoleTool:
-		// Tool messages in Anthropic are handled as tool results
+		// Tool messages in Anthropic are handled as tool_result content blocks
 		if msg.ToolCallID != "" {
 			return &Message{
-				Role:    "user",
-				Content: fmt.Sprintf("Tool result for %s: %s", msg.ToolCallID, msg.Content),
+				Role: "user",
+				ContentBlocks: []ContentBlock{{
+					Type:              "tool_result",
+					ToolUseID:         msg.ToolCallID,
+					ToolResultContent: msg.Content,
+				}},
 			}
 		}
 

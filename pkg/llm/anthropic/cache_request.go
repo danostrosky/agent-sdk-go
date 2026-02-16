@@ -71,15 +71,21 @@ func (b *cacheRequestBuilder) BuildMessages(messages []Message) (json.RawMessage
 
 	// Last message gets cache_control
 	lastMsg := messages[len(messages)-1]
-	result[len(messages)-1] = CacheableMessage{
-		Role: lastMsg.Role,
-		Content: []CacheableContent{
-			{
-				Type:         "text",
-				Text:         lastMsg.Content,
-				CacheControl: b.getCacheControl(),
+	if len(lastMsg.ContentBlocks) > 0 {
+		// ContentBlocks messages are already in array format;
+		// pass through directly (cache_control on tool_result blocks not yet supported)
+		result[len(messages)-1] = lastMsg
+	} else {
+		result[len(messages)-1] = CacheableMessage{
+			Role: lastMsg.Role,
+			Content: []CacheableContent{
+				{
+					Type:         "text",
+					Text:         lastMsg.Content,
+					CacheControl: b.getCacheControl(),
+				},
 			},
-		},
+		}
 	}
 
 	return json.Marshal(result)

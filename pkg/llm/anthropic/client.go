@@ -335,10 +335,69 @@ func SupportsThinking(model string) bool {
 	return false
 }
 
-// Message represents a message for Anthropic API
+// Message represents a message for Anthropic API.
+// Content is used for simple string messages; ContentBlocks is used for
+// structured content (tool_use, tool_result, mixed text+tool blocks).
+// When ContentBlocks is non-empty, it takes precedence over Content in JSON serialization.
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role          string         `json:"-"`
+	Content       string         `json:"-"`
+	ContentBlocks []ContentBlock `json:"-"`
+}
+
+// MarshalJSON implements custom JSON marshaling for Message.
+// If ContentBlocks is populated, content is serialized as an array of blocks;
+// otherwise content is serialized as a plain string.
+func (m Message) MarshalJSON() ([]byte, error) {
+	if len(m.ContentBlocks) > 0 {
+		return json.Marshal(struct {
+			Role    string         `json:"role"`
+			Content []ContentBlock `json:"content"`
+		}{Role: m.Role, Content: m.ContentBlocks})
+	}
+	return json.Marshal(struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}{Role: m.Role, Content: m.Content})
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling for Message.
+// Handles both string content and array-of-blocks content formats.
+func (m *Message) UnmarshalJSON(data []byte) error {
+	// Try string content first (common case)
+	var stringMsg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(data, &stringMsg); err == nil && stringMsg.Content != "" {
+		m.Role = stringMsg.Role
+		m.Content = stringMsg.Content
+		return nil
+	}
+	// Try array content
+	var blockMsg struct {
+		Role    string         `json:"role"`
+		Content []ContentBlock `json:"content"`
+	}
+	if err := json.Unmarshal(data, &blockMsg); err == nil && len(blockMsg.Content) > 0 {
+		m.Role = blockMsg.Role
+		m.ContentBlocks = blockMsg.Content
+		return nil
+	}
+	// Fallback: just get role (empty content)
+	var roleOnly struct {
+		Role string `json:"role"`
+	}
+	if err := json.Unmarshal(data, &roleOnly); err != nil {
+		return err
+	}
+	m.Role = roleOnly.Role
+	return nil
+}
+
+// HasContent returns true if the message has any content (string or blocks).
+func (m Message) HasContent() bool {
+	return len(m.ContentBlocks) > 0 || strings.TrimSpace(m.Content) != ""
 }
 
 // ToolUse represents a tool call for Anthropic API
@@ -352,9 +411,10 @@ type ToolUse struct {
 
 // ToolResult represents a tool result for Anthropic API
 type ToolResult struct {
-	Type     string `json:"type"`
-	Content  string `json:"content"`
-	ToolName string `json:"tool_name"`
+	Type      string `json:"type"`
+	ToolUseID string `json:"tool_use_id,omitempty"`
+	Content   string `json:"content"`
+	ToolName  string `json:"tool_name"`
 }
 
 // CompletionRequest represents a request for Anthropic API
@@ -389,7 +449,7 @@ type Tool struct {
 	InputSchema map[string]interface{} `json:"input_schema"`
 }
 
-// ContentBlock represents a content block in Anthropic API response
+// ContentBlock represents a content block in Anthropic API request/response
 type ContentBlock struct {
 	Type    string   `json:"type"`
 	Text    string   `json:"text,omitempty"`
@@ -398,6 +458,9 @@ type ContentBlock struct {
 	ID    string                 `json:"id,omitempty"`
 	Name  string                 `json:"name,omitempty"`
 	Input map[string]interface{} `json:"input,omitempty"`
+	// tool_result fields (request-side only)
+	ToolUseID         string `json:"tool_use_id,omitempty"`
+	ToolResultContent string `json:"content,omitempty"`
 }
 
 // CompletionResponse represents a response from Anthropic API
@@ -790,7 +853,7 @@ func (c *AnthropicClient) Chat(ctx context.Context, messages []llm.Message, para
 	// Filter out any nil messages (from system messages being skipped) and messages with empty content
 	var filteredMessages []Message
 	for _, msg := range anthropicMessages {
-		if msg.Role != "" && strings.TrimSpace(msg.Content) != "" {
+		if msg.Role != "" && msg.HasContent() {
 			filteredMessages = append(filteredMessages, msg)
 		}
 	}
@@ -1340,30 +1403,48 @@ func (c *AnthropicClient) GenerateWithTools(ctx context.Context, prompt string, 
 			"iteration": iteration + 1,
 		})
 
-		// Add the assistant response to messages only if there's text content
-		// (Tool-only responses will have empty text content)
-		assistantContent := strings.Join(textContent, "\n")
-		if strings.TrimSpace(assistantContent) != "" {
-			messages = append(messages, Message{
-				Role:    "assistant",
-				Content: assistantContent,
-			})
+		// Build assistant content blocks from full response (text + tool_use)
+		// This preserves the tool_use blocks so the model can match tool results
+		var assistantBlocks []ContentBlock
+		for _, block := range resp.Content {
+			switch block.Type {
+			case "text":
+				if strings.TrimSpace(block.Text) != "" {
+					assistantBlocks = append(assistantBlocks, ContentBlock{Type: "text", Text: block.Text})
+				}
+			case "tool_use":
+				cb := ContentBlock{Type: "tool_use"}
+				if block.ToolUse != nil {
+					cb.ID = block.ToolUse.ID
+					cb.Name = block.ToolUse.Name
+					cb.Input = block.ToolUse.Input
+				} else {
+					cb.ID = block.ID
+					cb.Name = block.Name
+					cb.Input = block.Input
+				}
+				assistantBlocks = append(assistantBlocks, cb)
+			}
+		}
+		if len(assistantBlocks) > 0 {
+			messages = append(messages, Message{Role: "assistant", ContentBlocks: assistantBlocks})
 		}
 
 		// Process tool calls in PARALLEL for better performance
 		toolResults := c.executeToolsParallel(ctx, toolCalls, tools, params, toolCallHistory, iteration)
 
-		// Create a new message from the user with the tool results
-		toolResultsJSON, err := json.Marshal(toolResults)
-		if err != nil {
-			return "", fmt.Errorf("failed to marshal tool results (iteration %d): %w", iteration+1, err)
+		// Build proper tool_result content blocks for the user message
+		var toolResultBlocks []ContentBlock
+		for _, result := range toolResults {
+			toolResultBlocks = append(toolResultBlocks, ContentBlock{
+				Type:              "tool_result",
+				ToolUseID:         result.ToolUseID,
+				ToolResultContent: result.Content,
+			})
 		}
-
-		// Add a user message with the tool results
-		messages = append(messages, Message{
-			Role:    "user",
-			Content: fmt.Sprintf("Here are the tool results: %s", string(toolResultsJSON)),
-		})
+		if len(toolResultBlocks) > 0 {
+			messages = append(messages, Message{Role: "user", ContentBlocks: toolResultBlocks})
+		}
 
 		// Continue to the next iteration with updated messages
 	}
@@ -1955,7 +2036,7 @@ func (c *AnthropicClient) executeToolsParallel(
 			c.logger.Error(ctx, "Tool call missing both Name and RecipientName", map[string]interface{}{"iteration": iteration + 1})
 			resultChan <- toolExecResult{
 				index:  i,
-				result: ToolResult{Type: "tool_result", Content: "Error: tool call missing name", ToolName: "unknown"},
+				result: ToolResult{Type: "tool_result", ToolUseID: toolCall.ID, Content: "Error: tool call missing name", ToolName: "unknown"},
 			}
 			continue
 		}
@@ -1999,7 +2080,7 @@ func (c *AnthropicClient) executeToolsParallel(
 
 			resultChan <- toolExecResult{
 				index:    i,
-				result:   ToolResult{Type: "tool_result", Content: errorMessage, ToolName: toolName},
+				result:   ToolResult{Type: "tool_result", ToolUseID: toolCall.ID, Content: errorMessage, ToolName: toolName},
 				toolName: toolName,
 			}
 			continue
@@ -2021,7 +2102,7 @@ func (c *AnthropicClient) executeToolsParallel(
 			})
 			resultChan <- toolExecResult{
 				index:    i,
-				result:   ToolResult{Type: "tool_result", Content: fmt.Sprintf("Error: %v", err), ToolName: toolName},
+				result:   ToolResult{Type: "tool_result", ToolUseID: toolCall.ID, Content: fmt.Sprintf("Error: %v", err), ToolName: toolName},
 				toolName: toolName,
 				err:      err,
 			}
@@ -2102,7 +2183,7 @@ func (c *AnthropicClient) executeToolsParallel(
 				})
 				resultChan <- toolExecResult{
 					index:    idx,
-					result:   ToolResult{Type: "tool_result", Content: fmt.Sprintf("Error: %v", execErr), ToolName: tName},
+					result:   ToolResult{Type: "tool_result", ToolUseID: tc.ID, Content: fmt.Sprintf("Error: %v", execErr), ToolName: tName},
 					toolName: tName,
 					toolJSON: string(tJSON),
 					err:      execErr,
@@ -2112,7 +2193,7 @@ func (c *AnthropicClient) executeToolsParallel(
 
 			resultChan <- toolExecResult{
 				index:    idx,
-				result:   ToolResult{Type: "tool_result", Content: toolResult, ToolName: tName},
+				result:   ToolResult{Type: "tool_result", ToolUseID: tc.ID, Content: toolResult, ToolName: tName},
 				toolName: tName,
 				toolJSON: string(tJSON),
 			}

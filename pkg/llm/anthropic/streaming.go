@@ -581,21 +581,26 @@ func (c *AnthropicClient) executeStreamingWithTools(
 			"responseType": "tool_calls",
 		})
 
-		// Add assistant message to conversation history (matching non-streaming behavior)
-		// Build assistant content from captured events
-		var assistantContent strings.Builder
+		// Build assistant content blocks from captured events + tool_use blocks
+		var assistantBlocks []ContentBlock
+		var textBuilder strings.Builder
 		for _, event := range capturedContentEvents {
 			if event.Type == interfaces.StreamEventContentDelta {
-				assistantContent.WriteString(event.Content)
+				textBuilder.WriteString(event.Content)
 			}
 		}
-
-		// Add assistant message only if there's text content (matching client.go:1196-1200)
-		if strings.TrimSpace(assistantContent.String()) != "" {
-			messages = append(messages, Message{
-				Role:    "assistant",
-				Content: assistantContent.String(),
-			})
+		if strings.TrimSpace(textBuilder.String()) != "" {
+			assistantBlocks = append(assistantBlocks, ContentBlock{Type: "text", Text: textBuilder.String()})
+		}
+		for _, tc := range toolCalls {
+			var input map[string]interface{}
+			if tc.Arguments != "" {
+				_ = json.Unmarshal([]byte(tc.Arguments), &input)
+			}
+			assistantBlocks = append(assistantBlocks, ContentBlock{Type: "tool_use", ID: tc.ID, Name: tc.Name, Input: input})
+		}
+		if len(assistantBlocks) > 0 {
+			messages = append(messages, Message{Role: "assistant", ContentBlocks: assistantBlocks})
 		}
 
 		// Send a line break before tool execution for clarity
@@ -632,10 +637,14 @@ func (c *AnthropicClient) executeStreamingWithTools(
 				// Add tool not found error as tool result instead of returning
 				errorMessage := fmt.Sprintf("Error: tool not found: %s", toolCall.Name)
 
-				// Add tool result message
+				// Add tool result message as proper tool_result block
 				messages = append(messages, Message{
-					Role:    "user", // Tool results come as user messages to Anthropic
-					Content: fmt.Sprintf("Tool %s result: %s", toolCall.Name, errorMessage),
+					Role: "user",
+					ContentBlocks: []ContentBlock{{
+						Type:              "tool_result",
+						ToolUseID:         toolCall.ID,
+						ToolResultContent: errorMessage,
+					}},
 				})
 
 				// Send tool result event with error
@@ -669,10 +678,14 @@ func (c *AnthropicClient) executeStreamingWithTools(
 				toolResult = fmt.Sprintf("Error: %v", err)
 			}
 
-			// Add tool result message
+			// Add tool result message as proper tool_result block
 			messages = append(messages, Message{
-				Role:    "user", // Tool results come as user messages to Anthropic
-				Content: fmt.Sprintf("Tool %s result: %s", toolCall.Name, toolResult),
+				Role: "user",
+				ContentBlocks: []ContentBlock{{
+					Type:              "tool_result",
+					ToolUseID:         toolCall.ID,
+					ToolResultContent: toolResult,
+				}},
 			})
 
 			// Send tool result event
