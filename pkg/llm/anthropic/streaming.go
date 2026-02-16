@@ -840,6 +840,12 @@ func (c *AnthropicClient) createFilteredEventForwarder(
 	var capturedContentEvents []interfaces.StreamEvent
 
 	for event := range tempEventChan {
+		// Track thinking blocks as meaningful content so the tool-calling loop
+		// knows the model responded (prevents unnecessary extra iterations)
+		if event.Type == interfaces.StreamEventThinking && event.Content != "" {
+			hasContent = true
+		}
+
 		// Always capture content events for conversation history (not just when filtering)
 		if event.Type == interfaces.StreamEventContentDelta && event.Content != "" {
 			hasContent = true
