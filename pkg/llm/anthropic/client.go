@@ -463,6 +463,40 @@ type ContentBlock struct {
 	ToolResultContent string `json:"content,omitempty"`
 }
 
+// MarshalJSON implements custom JSON marshaling for ContentBlock.
+// Each block type emits only its relevant fields, and tool_use blocks
+// always include the required `input` field (even when empty).
+func (cb ContentBlock) MarshalJSON() ([]byte, error) {
+	switch cb.Type {
+	case "tool_use":
+		input := cb.Input
+		if input == nil {
+			input = map[string]interface{}{}
+		}
+		return json.Marshal(struct {
+			Type  string                 `json:"type"`
+			ID    string                 `json:"id"`
+			Name  string                 `json:"name"`
+			Input map[string]interface{} `json:"input"`
+		}{Type: cb.Type, ID: cb.ID, Name: cb.Name, Input: input})
+	case "tool_result":
+		return json.Marshal(struct {
+			Type      string `json:"type"`
+			ToolUseID string `json:"tool_use_id"`
+			Content   string `json:"content"`
+		}{Type: cb.Type, ToolUseID: cb.ToolUseID, Content: cb.ToolResultContent})
+	case "text":
+		return json.Marshal(struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}{Type: cb.Type, Text: cb.Text})
+	default:
+		// Fallback: use an alias to avoid recursion, marshal all tagged fields
+		type contentBlockAlias ContentBlock
+		return json.Marshal(contentBlockAlias(cb))
+	}
+}
+
 // CompletionResponse represents a response from Anthropic API
 type CompletionResponse struct {
 	ID         string         `json:"id"`
