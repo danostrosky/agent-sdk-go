@@ -335,10 +335,65 @@ func SupportsThinking(model string) bool {
 	return false
 }
 
-// Message represents a message for Anthropic API
+// Message represents a message for Anthropic API.
+// It supports both simple string content and structured content block arrays.
+// When ContentBlocks is populated, it serializes content as an array of blocks
+// (required for tool_use assistant messages and tool_result user messages).
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role          string         `json:"role"`
+	Content       string         `json:"-"`
+	ContentBlocks []ContentBlock `json:"-"`
+}
+
+// MarshalJSON implements custom JSON marshaling for Message.
+// Uses content block array when ContentBlocks is set, otherwise plain string.
+func (m Message) MarshalJSON() ([]byte, error) {
+	if len(m.ContentBlocks) > 0 {
+		return json.Marshal(struct {
+			Role    string         `json:"role"`
+			Content []ContentBlock `json:"content"`
+		}{Role: m.Role, Content: m.ContentBlocks})
+	}
+	return json.Marshal(struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}{Role: m.Role, Content: m.Content})
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling for Message.
+func (m *Message) UnmarshalJSON(data []byte) error {
+	// Try string content first (common case)
+	var stringMsg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(data, &stringMsg); err == nil && stringMsg.Content != "" {
+		m.Role = stringMsg.Role
+		m.Content = stringMsg.Content
+		return nil
+	}
+	// Try array content
+	var blockMsg struct {
+		Role    string         `json:"role"`
+		Content []ContentBlock `json:"content"`
+	}
+	if err := json.Unmarshal(data, &blockMsg); err == nil && len(blockMsg.Content) > 0 {
+		m.Role = blockMsg.Role
+		m.ContentBlocks = blockMsg.Content
+		return nil
+	}
+	// Fallback: just get role
+	var roleOnly struct {
+		Role string `json:"role"`
+	}
+	_ = json.Unmarshal(data, &roleOnly)
+	m.Role = roleOnly.Role
+	return nil
+}
+
+// HasContent returns true if the message has any content (string or blocks).
+func (m Message) HasContent() bool {
+	return len(m.ContentBlocks) > 0 || strings.TrimSpace(m.Content) != ""
 }
 
 // ToolUse represents a tool call for Anthropic API
@@ -389,7 +444,8 @@ type Tool struct {
 	InputSchema map[string]interface{} `json:"input_schema"`
 }
 
-// ContentBlock represents a content block in Anthropic API response
+// ContentBlock represents a content block in Anthropic API requests and responses.
+// Supports text, tool_use, and tool_result block types.
 type ContentBlock struct {
 	Type    string   `json:"type"`
 	Text    string   `json:"text,omitempty"`
@@ -398,6 +454,49 @@ type ContentBlock struct {
 	ID    string                 `json:"id,omitempty"`
 	Name  string                 `json:"name,omitempty"`
 	Input map[string]interface{} `json:"input,omitempty"`
+	// tool_result fields (request-side only)
+	ToolUseID string `json:"tool_use_id,omitempty"`
+	// ToolResultContent holds the content for tool_result blocks.
+	// We use a separate field to avoid conflict with the top-level Content field.
+	ToolResultContent string `json:"-"`
+}
+
+// MarshalJSON implements custom JSON marshaling for ContentBlock.
+// Each block type serializes only its relevant fields.
+func (cb ContentBlock) MarshalJSON() ([]byte, error) {
+	switch cb.Type {
+	case "tool_use":
+		input := cb.Input
+		if input == nil {
+			input = map[string]interface{}{}
+		}
+		return json.Marshal(struct {
+			Type  string                 `json:"type"`
+			ID    string                 `json:"id"`
+			Name  string                 `json:"name"`
+			Input map[string]interface{} `json:"input"`
+		}{Type: "tool_use", ID: cb.ID, Name: cb.Name, Input: input})
+
+	case "tool_result":
+		return json.Marshal(struct {
+			Type      string `json:"type"`
+			ToolUseID string `json:"tool_use_id"`
+			Content   string `json:"content"`
+		}{Type: "tool_result", ToolUseID: cb.ToolUseID, Content: cb.ToolResultContent})
+
+	case "text":
+		return json.Marshal(struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}{Type: "text", Text: cb.Text})
+
+	default:
+		// Fallback: marshal all fields
+		type contentBlockAlias ContentBlock
+		return json.Marshal(struct {
+			contentBlockAlias
+		}{contentBlockAlias: contentBlockAlias(cb)})
+	}
 }
 
 // CompletionResponse represents a response from Anthropic API
@@ -790,7 +889,7 @@ func (c *AnthropicClient) Chat(ctx context.Context, messages []llm.Message, para
 	// Filter out any nil messages (from system messages being skipped) and messages with empty content
 	var filteredMessages []Message
 	for _, msg := range anthropicMessages {
-		if msg.Role != "" && strings.TrimSpace(msg.Content) != "" {
+		if msg.Role != "" && msg.HasContent() {
 			filteredMessages = append(filteredMessages, msg)
 		}
 	}

@@ -50,6 +50,7 @@ type ContentBlockDeltaData struct {
 		Type        string `json:"type"`
 		Text        string `json:"text,omitempty"`
 		Thinking    string `json:"thinking,omitempty"`     // Thinking content field
+		Signature   string `json:"signature,omitempty"`    // Thinking signature field (signature_delta)
 		PartialJSON string `json:"partial_json,omitempty"` // For input_json_delta events
 	} `json:"delta"`
 }
@@ -202,6 +203,11 @@ func (c *AnthropicClient) convertAnthropicEventToStreamEvent(event *AnthropicSSE
 			}
 
 			// Return nil to skip sending event now - will send complete tool call later
+			return nil, nil
+		}
+
+		// Skip signature_delta events (thinking block signatures)
+		if blockDelta.Delta.Type == "signature_delta" {
 			return nil, nil
 		}
 

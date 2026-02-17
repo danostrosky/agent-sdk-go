@@ -581,39 +581,44 @@ func (c *AnthropicClient) executeStreamingWithTools(
 			"responseType": "tool_calls",
 		})
 
-		// Add assistant message to conversation history (matching non-streaming behavior)
-		// Build assistant content from captured events
-		var assistantContent strings.Builder
+		// Build assistant message with content blocks (text + tool_use).
+		// The Anthropic API requires tool_use blocks in assistant messages
+		// so the model can match tool results to previous calls.
+		var assistantBlocks []ContentBlock
+
+		// Collect text content from captured events
+		var textBuilder strings.Builder
 		for _, event := range capturedContentEvents {
 			if event.Type == interfaces.StreamEventContentDelta {
-				assistantContent.WriteString(event.Content)
+				textBuilder.WriteString(event.Content)
 			}
 		}
+		if strings.TrimSpace(textBuilder.String()) != "" {
+			assistantBlocks = append(assistantBlocks, ContentBlock{Type: "text", Text: textBuilder.String()})
+		}
 
-		// Add assistant message only if there's text content (matching client.go:1196-1200)
-		if strings.TrimSpace(assistantContent.String()) != "" {
-			messages = append(messages, Message{
-				Role:    "assistant",
-				Content: assistantContent.String(),
+		// Add tool_use blocks for each tool call
+		for _, tc := range toolCalls {
+			var input map[string]interface{}
+			if tc.Arguments != "" {
+				_ = json.Unmarshal([]byte(tc.Arguments), &input)
+			}
+			assistantBlocks = append(assistantBlocks, ContentBlock{
+				Type:  "tool_use",
+				ID:    tc.ID,
+				Name:  tc.Name,
+				Input: input,
 			})
 		}
 
-		// Send a line break before tool execution for clarity
-		select {
-		case eventChan <- interfaces.StreamEvent{
-			Type:      interfaces.StreamEventContentDelta,
-			Content:   "\n", // Single line break before tools
-			Timestamp: time.Now(),
-			Metadata: map[string]interface{}{
-				"before_tools": true,
-				"iteration":    iteration + 1,
-			},
-		}:
-		case <-ctx.Done():
-			return ctx.Err()
+		if len(assistantBlocks) > 0 {
+			messages = append(messages, Message{Role: "assistant", ContentBlocks: assistantBlocks})
 		}
 
-		// Execute each tool and add results
+		// Execute tools and collect all results into a single user message
+		// with tool_result content blocks (Anthropic requires alternating roles).
+		var toolResultBlocks []ContentBlock
+
 		for _, toolCall := range toolCalls {
 			// Find the requested tool
 			var selectedTool interfaces.Tool
@@ -624,58 +629,35 @@ func (c *AnthropicClient) executeStreamingWithTools(
 				}
 			}
 
+			var toolResult string
 			if selectedTool == nil {
 				c.logger.Error(ctx, "Tool not found in streaming", map[string]interface{}{
 					"toolName": toolCall.Name,
 				})
-
-				// Add tool not found error as tool result instead of returning
-				errorMessage := fmt.Sprintf("Error: tool not found: %s", toolCall.Name)
-
-				// Add tool result message
-				messages = append(messages, Message{
-					Role:    "user", // Tool results come as user messages to Anthropic
-					Content: fmt.Sprintf("Tool %s result: %s", toolCall.Name, errorMessage),
+				toolResult = fmt.Sprintf("Error: tool not found: %s", toolCall.Name)
+			} else {
+				// Execute tool
+				c.logger.Info(ctx, "[TOOL EXECUTION DEBUG] Executing tool in streaming", map[string]interface{}{
+					"toolName":  toolCall.Name,
+					"arguments": toolCall.Arguments,
+					"iteration": iteration + 1,
 				})
 
-				// Send tool result event with error
-				select {
-				case eventChan <- interfaces.StreamEvent{
-					Type: interfaces.StreamEventToolResult,
-					ToolCall: &interfaces.ToolCall{
-						ID:        toolCall.ID,
-						Name:      toolCall.Name,
-						Arguments: toolCall.Arguments,
-					},
-					Content:   errorMessage,
-					Timestamp: time.Now(),
-				}:
-				case <-ctx.Done():
-					return ctx.Err()
+				var execErr error
+				toolResult, execErr = selectedTool.Execute(ctx, toolCall.Arguments)
+				if execErr != nil {
+					toolResult = fmt.Sprintf("Error: %v", execErr)
 				}
-
-				continue // Continue processing other tool calls
 			}
 
-			// Execute tool
-			c.logger.Info(ctx, "[TOOL EXECUTION DEBUG] Executing tool in streaming", map[string]interface{}{
-				"toolName":  toolCall.Name,
-				"arguments": toolCall.Arguments,
-				"iteration": iteration + 1,
+			// Add tool_result block
+			toolResultBlocks = append(toolResultBlocks, ContentBlock{
+				Type:              "tool_result",
+				ToolUseID:         toolCall.ID,
+				ToolResultContent: toolResult,
 			})
 
-			toolResult, err := selectedTool.Execute(ctx, toolCall.Arguments)
-			if err != nil {
-				toolResult = fmt.Sprintf("Error: %v", err)
-			}
-
-			// Add tool result message
-			messages = append(messages, Message{
-				Role:    "user", // Tool results come as user messages to Anthropic
-				Content: fmt.Sprintf("Tool %s result: %s", toolCall.Name, toolResult),
-			})
-
-			// Send tool result event
+			// Send tool result event to consumer
 			select {
 			case eventChan <- interfaces.StreamEvent{
 				Type: interfaces.StreamEventToolResult,
@@ -684,12 +666,17 @@ func (c *AnthropicClient) executeStreamingWithTools(
 					Name:      toolCall.Name,
 					Arguments: toolCall.Arguments,
 				},
-				Content:   toolResult, // Tool result goes in Content field
+				Content:   toolResult,
 				Timestamp: time.Now(),
 			}:
 			case <-ctx.Done():
 				return ctx.Err()
 			}
+		}
+
+		// Add all tool results as a single user message with content blocks
+		if len(toolResultBlocks) > 0 {
+			messages = append(messages, Message{Role: "user", ContentBlocks: toolResultBlocks})
 		}
 
 		// Send a line break between iterations for better readability
@@ -839,7 +826,17 @@ func (c *AnthropicClient) createFilteredEventForwarder(
 	var hasContent bool
 	var capturedContentEvents []interfaces.StreamEvent
 
+	var thinkingEventCount int
+	var eventCount int
+
 	for event := range tempEventChan {
+		eventCount++
+
+		// Track thinking events for debugging
+		if event.Type == interfaces.StreamEventThinking {
+			thinkingEventCount++
+		}
+
 		// Always capture content events for conversation history (not just when filtering)
 		if event.Type == interfaces.StreamEventContentDelta && event.Content != "" {
 			hasContent = true
@@ -868,6 +865,14 @@ func (c *AnthropicClient) createFilteredEventForwarder(
 			return nil, false, nil, event.Error
 		}
 	}
+
+	c.logger.Debug(ctx, "[FORWARDER] Event processing complete", map[string]interface{}{
+		"totalEvents":    eventCount,
+		"thinkingEvents": thinkingEventCount,
+		"toolCalls":      len(toolCalls),
+		"hasContent":     hasContent,
+		"capturedEvents": len(capturedContentEvents),
+	})
 
 	return toolCalls, hasContent, capturedContentEvents, nil
 }
