@@ -554,6 +554,18 @@ func (c *AnthropicClient) executeStreamingWithTools(
 				case <-ctx.Done():
 					return ctx.Err()
 				}
+
+				// Send message_stop so the consumer knows the stream is done.
+				// Protocol events are filtered during intermediate iterations,
+				// so we must send this explicitly for the final response.
+				select {
+				case eventChan <- interfaces.StreamEvent{
+					Type:      interfaces.StreamEventMessageStop,
+					Timestamp: time.Now(),
+				}:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 				// Mark that we got a complete response
 				gotCompleteResponse = true
 				// Break out of iteration loop (don't return - let final synthesis check happen)
@@ -904,6 +916,18 @@ func (c *AnthropicClient) createFilteredEventForwarder(
 			// If filtering is enabled, don't forward the content yet
 			if filterContentDeltas {
 				continue // Skip forwarding
+			}
+		}
+
+		// When filtering, also suppress message_start/message_stop protocol events.
+		// These are emitted per-iteration, but the consumer should only see them
+		// for the final response. Forwarding message_stop from intermediate
+		// iterations causes consumers to stop reading the channel prematurely,
+		// missing subsequent thinking events and the final answer.
+		if filterContentDeltas {
+			if event.Type == interfaces.StreamEventMessageStart ||
+				event.Type == interfaces.StreamEventMessageStop {
+				continue // Skip forwarding protocol events during intermediate iterations
 			}
 		}
 
